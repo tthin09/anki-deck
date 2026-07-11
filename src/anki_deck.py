@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import hashlib
 import json
 import random
@@ -208,17 +209,25 @@ def select_audio(entries) -> dict | None:
             if not isinstance(phonetic, dict):
                 continue
             url = str(phonetic.get("audio") or "").strip()
-            if url.startswith("//"):
-                url = "https:" + url
-            parsed = urlparse(url)
-            if parsed.scheme != "https" or not parsed.netloc:
+            audio = audio_metadata(url)
+            if not audio:
                 continue
-            marker = parsed.path.casefold()
+            marker = urlparse(audio["url"]).path.casefold()
             rank = 0 if re.search(r"(?:^|[-_/.])us(?:[-_/.]|$)", marker) else 1 if re.search(r"(?:^|[-_/.])(uk|gb)(?:[-_/.]|$)", marker) else 2
-            candidates.append((rank, url, phonetic))
+            candidates.append((rank, audio["url"]))
     if not candidates:
         return None
-    _, url, phonetic = min(candidates, key=lambda item: item[0])
+    _, url = min(candidates, key=lambda item: item[0])
+    return audio_metadata(url)
+
+
+def audio_metadata(url: str) -> dict | None:
+    url = html.unescape(url.strip())
+    if url.startswith("//"):
+        url = "https:" + url
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.netloc:
+        return None
     suffix = Path(urlparse(url).path).suffix.lower()
     if not re.fullmatch(r"\.[a-z0-9]{2,5}", suffix):
         suffix = ".mp3"
@@ -233,17 +242,60 @@ def dictionary_audio(text: str) -> dict | None:
     return select_audio(get_json(url))
 
 
+def wiktionary_audio_from_html(page: str) -> dict | None:
+    english = re.search(r'<h2 id="English">.*?(?=<h2|\Z)', page, flags=re.DOTALL)
+    if not english:
+        return None
+    for url in re.findall(r'<source src="([^"]+)" type="audio/mpeg"', english.group(0)):
+        audio = audio_metadata(url)
+        if audio:
+            return audio
+    return None
+
+
+def wiktionary_audio(text: str) -> dict | None:
+    url = f"https://en.wiktionary.org/w/rest.php/v1/page/{quote(text, safe='')}/html"
+    try:
+        with urlopen(Request(url, headers={"User-Agent": "anki-deck/1.0 (audio lookup)"}), timeout=20) as response:
+            return wiktionary_audio_from_html(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        raise RuntimeError(f"Wiktionary trả về lỗi {exc.code}.") from exc
+    except (URLError, TimeoutError, ConnectionError, socket.timeout, UnicodeError) as exc:
+        raise RuntimeError(f"Không đọc được Wiktionary: {exc}") from exc
+
+
+def google_tts_audio(text: str) -> dict | None:
+    url = "https://translate.googleapis.com/translate_tts?ie=UTF-8&client=tw-ob&tl=en-US&q=" + quote(text)
+    return audio_metadata(url)
+
+
+def resolve_audio(text: str, sources=None) -> dict | None:
+    for source in sources or (dictionary_audio, wiktionary_audio, google_tts_audio):
+        try:
+            audio = source(text)
+        except RuntimeError:
+            continue
+        if audio:
+            return audio
+    return None
+
+
 def enrich_audio(cards: list[dict], reverse_cards: list[dict]) -> None:
     cache: dict[str, dict | None] = {}
+    next_dictionary_request = 0.0
+
+    def paced_dictionary_audio(text: str) -> dict | None:
+        nonlocal next_dictionary_request
+        delay = next_dictionary_request - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+        next_dictionary_request = time.monotonic() + 2.5
+        return dictionary_audio(text)
 
     def lookup(text: str) -> dict | None:
         key = text.casefold()
         if key not in cache:
-            try:
-                cache[key] = dictionary_audio(text)
-            except RuntimeError as exc:
-                cache[key] = None
-                msg("Cảnh báo", f"Không lấy được audio cho '{text}': {exc}")
+            cache[key] = resolve_audio(text, (paced_dictionary_audio, wiktionary_audio, google_tts_audio))
         return cache[key]
 
     by_word = {}
@@ -588,6 +640,32 @@ def run_self_test() -> None:
     assert audio["filename"].startswith("vocab_") and audio["filename"].endswith(".mp3")
     assert set(audio) == {"url", "filename"}
     assert select_audio([{"phonetics": [{"audio": "http://example.com/unsafe.mp3"}]}]) is None
+    wiktionary = wiktionary_audio_from_html(
+        '<h2 id="French">French</h2><source src="//example.com/french.mp3" type="audio/mpeg">'
+        '<h2 id="English">English</h2><source src="//upload.wikimedia.org/english.mp3" type="audio/mpeg">'
+    )
+    assert wiktionary and wiktionary["url"] == "https://upload.wikimedia.org/english.mp3"
+    assert wiktionary_audio_from_html('<h2 id="English">English</h2><source src="http://example.com/audio.mp3" type="audio/mpeg">') is None
+    calls = []
+
+    def missing_source(text):
+        calls.append("missing")
+        return None
+
+    def backup_source(text):
+        calls.append("backup")
+        return {"url": "https://example.com/backup.mp3", "filename": "backup.mp3"}
+
+    def unused_source(text):
+        calls.append("tts")
+        return {"url": "https://example.com/tts.mp3", "filename": "tts.mp3"}
+
+    assert resolve_audio("word", (missing_source, backup_source, unused_source))["filename"] == "backup.mp3"
+    assert calls == ["missing", "backup"]
+    calls.clear()
+    assert resolve_audio("word", (missing_source, missing_source, unused_source))["filename"] == "tts.mp3"
+    assert calls == ["missing", "missing", "tts"]
+    assert google_tts_audio("two words")["url"].endswith("q=two%20words")
     normal_note = anki_note("Deck", "front", "back", ["ai-vocab"], audio, "Front")
     reverse_note = anki_note("Deck", "front", "back", ["reverse"], audio, "Back")
     assert normal_note["audio"]["fields"] == ["Front"]

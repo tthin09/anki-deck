@@ -11,11 +11,11 @@ The packaged `run.exe` needs no Python installation, but it must be distributed 
 
 1. Read and deduplicate UTF-8 `.txt` files from `input/`.
 2. Ask Gemini for vocabulary data and reverse practice sentences.
-3. Query `https://api.dictionaryapi.dev/api/v2/entries/en/<word>` for pronunciation media.
+3. Resolve pronunciation media through DictionaryAPI, Wiktionary, then Google Translate TTS.
 4. Write the review workbook to `vocabulary/`.
 5. Send notes to the locally running AnkiConnect server. AnkiConnect downloads audio into Anki's media collection.
 
-Every major phase logs when it starts and whether it completed or failed, including elapsed seconds. Status labels use a fixed-width column such as `[Đang chạy]` and `[OK       ]`. Missing DictionaryAPI audio is a warning; the text-only card is still created.
+Every major phase logs when it starts and whether it completed or failed, including elapsed seconds. Status labels use a fixed-width column such as `[Đang chạy]` and `[OK       ]`. Audio lookup failures are non-fatal; the text-only card is still created only if every source fails.
 
 Gemini calls time out after 30 seconds. Transient overload and connection failures retry automatically three times; each retry reprints the active batch with its elapsed time.
 
@@ -33,7 +33,9 @@ Gemini calls time out after 30 seconds. Transient overload and connection failur
 ## External services
 
 - **Gemini API:** generates structured card content. Each user supplies their own API key.
-- **DictionaryAPI:** supplies pronunciation URLs. Selection priority is US, UK/GB, then any HTTPS recording.
+- **DictionaryAPI:** primary pronunciation source, paced at one uncached request every 2.5 seconds. Selection priority is US, UK/GB, then any HTTPS recording.
+- **Wiktionary:** backup source; the app reads an English entry's HTTPS MP3 recording.
+- **Google Translate TTS:** no-key final fallback for an exact word or phrase. This compatibility endpoint is free but not a supported developer API and may change or throttle.
 - **AnkiConnect:** creates notes and downloads audio. Anki must be open with add-on `2055492159` installed.
 
 Normal-card audio is attached to `Front`. Reverse-card audio is attached to `Back`; the exact displayed answer form is tried first, then the original vocabulary word. No audio source text is shown on cards. The app enables autoplay on the configured deck preset before adding notes.
@@ -102,5 +104,5 @@ Distribute the whole project runtime folder as a ZIP, including `run.exe`, `src/
 - Lookups are cached case-insensitively for one run.
 - Media filenames are deterministic URL hashes, preventing unsafe characters and collisions.
 - Only HTTPS audio URLs are accepted.
-- API/network/404/malformed-response failures do not stop card creation.
+- DictionaryAPI 404, 429, network, and malformed-response failures continue to Wiktionary, then Google Translate TTS; remaining failures do not stop card creation.
 - The app enables Anki's native autoplay for the configured deck preset; normal replay controls remain available and no custom model or JavaScript is required.
