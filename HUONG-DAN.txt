@@ -1,0 +1,34 @@
+HƯỚNG DẪN SỬ DỤNG
+
+CHUẨN BỊ LẦN ĐẦU
+1. Giải nén TOÀN BỘ file ZIP. Không sao chép riêng run.exe.
+2. Cài AnkiConnect trong Anki bằng mã add-on 2055492159, rồi khởi động lại Anki.
+3. Tạo khóa Gemini API riêng của bạn và dán vào gemini_api_key trong src/config.json.
+
+CÁCH CHẠY
+1. Mở Anki trước.
+2. Đặt file .txt chứa từ vựng vào thư mục input.
+3. Mỗi từ hoặc cụm từ phải nằm trên một dòng riêng.
+4. LƯU VÀ ĐÓNG tất cả file .txt. Nội dung chưa lưu sẽ không được xử lý.
+5. Nhấp đúp run.exe và chờ chương trình chạy xong.
+6. Kiểm tra file Excel mới trong thư mục vocabulary và các thẻ mới trong Anki.
+
+NẾU KHÔNG CHẠY ĐƯỢC
+1. Mở Anki và kiểm tra AnkiConnect đã được cài, đang bật.
+2. Nhấp đúp KIEM-TRA.cmd.
+3. Gửi file bao-cao-kiem-tra.txt cho người hỗ trợ. Báo cáo không chứa khóa API.
+
+ĐỒNG BỘ THẺ CŨ CHƯA CÓ AUDIO
+1. Mở Anki.
+2. Nhấp đúp migrate.exe.
+3. Kiểm tra số lượng thẻ, nhập Y rồi nhấn Enter để xác nhận.
+4. Xem kết quả trong bao-cao-migrate.txt.
+- Có thể chạy lại migrate.exe; thẻ đã có audio sẽ được bỏ qua.
+
+LƯU Ý
+- Có thể đặt nhiều file .txt trong thư mục input.
+- Không chạy trực tiếp trong file ZIP; phải giải nén toàn bộ thư mục trước.
+- Nếu Windows SmartScreen cảnh báo vì run.exe chưa được ký số, chọn More info > Run anyway nếu bạn nhận file từ nguồn tin cậy.
+- File Excel chỉ dùng để kiểm tra nội dung; thẻ vẫn được thêm vào Anki tự động.
+- Nếu không tìm thấy audio cho một từ, chương trình sẽ cảnh báo nhưng vẫn tạo thẻ không có âm thanh.
+- Audio sẽ tự động phát khi mặt thẻ có âm thanh xuất hiện; thẻ không hiển thị nguồn audio.
