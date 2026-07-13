@@ -55,10 +55,12 @@ CARD_SCHEMA = {
                     "anki_front_html",
                     "anki_back_html",
                 ],
+                "additionalProperties": False,
             },
         }
     },
     "required": ["cards"],
+    "additionalProperties": False,
 }
 
 
@@ -75,10 +77,12 @@ REVERSE_SCHEMA = {
                     "vietnamese_hint": {"type": "string"},
                 },
                 "required": ["word", "sentence", "vietnamese_hint"],
+                "additionalProperties": False,
             },
         }
     },
     "required": ["cards"],
+    "additionalProperties": False,
 }
 
 
@@ -140,7 +144,7 @@ def load_config(root: Path) -> dict:
     config.setdefault("model", "openai/gpt-oss-20b")
     config.setdefault("deck_name", "English Vocabulary")
     config.setdefault("anki_connect_url", "http://127.0.0.1:8765")
-    config.setdefault("chunk_size", 30)
+    config.setdefault("chunk_size", 5)
     return config
 
 
@@ -322,12 +326,17 @@ def groq_json(items: list[dict | str], prompt: str, schema: dict, config: dict) 
         "model": model,
         "messages": [
             {
-                "role": "user",
-                "content": prompt
-                + "\n\nReturn only valid JSON. Input data as JSON array:\n"
-                + json.dumps(items, ensure_ascii=False),
-            }
+                "role": "system",
+                "content": prompt + "\n\nReturn only valid JSON. Do not use Markdown.",
+            },
+            {"role": "user", "content": "Input data as JSON array:\n" + json.dumps(items, ensure_ascii=False)},
         ],
+        "max_completion_tokens": 4096,
+        "reasoning_effort": "low",
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "anki_cards", "strict": True, "schema": schema},
+        },
     }
     last_error = None
     for attempt in range(4):

@@ -2,6 +2,6 @@
   "groq_api_key": "YOUR_GROQ_API_KEY",
   "model": "openai/gpt-oss-20b",
   "anki_connect_url": "http://127.0.0.1:8765",
-  "chunk_size": 10,
+  "chunk_size": 5,
   "deck_name": "English Vocabulary"
 }
