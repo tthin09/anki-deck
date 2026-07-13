@@ -229,8 +229,9 @@ def audio_metadata(url: str) -> dict | None:
     if parsed.scheme != "https" or not parsed.netloc:
         return None
     suffix = Path(urlparse(url).path).suffix.lower()
-    if not re.fullmatch(r"\.[a-z0-9]{2,5}", suffix):
-        suffix = ".mp3"
+    if suffix and suffix != ".mp3":
+        return None
+    suffix = ".mp3"
     return {
         "url": url,
         "filename": f"vocab_{hashlib.sha256(url.encode()).hexdigest()[:16]}{suffix}",
@@ -639,6 +640,9 @@ def run_self_test() -> None:
     assert audio and audio["url"].endswith("-us.mp3")
     assert audio["filename"].startswith("vocab_") and audio["filename"].endswith(".mp3")
     assert set(audio) == {"url", "filename"}
+    assert audio_metadata("https://example.com/audio") ["filename"].endswith(".mp3")
+    assert audio_metadata("https://example.com/audio.ogg") is None
+    assert audio_metadata("https://example.com/audio.wav") is None
     assert select_audio([{"phonetics": [{"audio": "http://example.com/unsafe.mp3"}]}]) is None
     wiktionary = wiktionary_audio_from_html(
         '<h2 id="French">French</h2><source src="//example.com/french.mp3" type="audio/mpeg">'

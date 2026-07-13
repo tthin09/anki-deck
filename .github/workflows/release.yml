@@ -1,0 +1,46 @@
+name: Build release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build dependencies
+        run: python -m pip install -r src\requirements.txt
+      - name: Run source self-tests
+        run: |
+          python src\anki_deck.py --self-test --no-pause
+          python src\migrate_audio.py --self-test --no-pause
+      - name: Build executables
+        run: |
+          python -m PyInstaller --onefile --console --name run --clean --noconfirm src\anki_deck.py
+          python -m PyInstaller --onefile --console --name migrate --clean --noconfirm src\migrate_audio.py
+      - name: Run packaged self-tests
+        run: |
+          .\dist\run.exe --self-test --no-pause
+          .\dist\migrate.exe --self-test --no-pause
+      - name: Stage runtime package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path release\src, release\vocabulary -Force | Out-Null
+          Copy-Item dist\run.exe release\run.exe
+          Copy-Item dist\migrate.exe release\migrate.exe
+          Copy-Item update.cmd, update.ps1, HUONG-DAN.txt, KIEM-TRA.cmd release\
+          Copy-Item src\agent-prompt.md, src\reverse-prompt.md, src\config.example.json release\src\
+          Copy-Item vocabulary\template.xlsx release\vocabulary\template.xlsx
+          Compress-Archive -Path release\* -DestinationPath anki-deck-runtime.zip -Force
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" anki-deck-runtime.zip --generate-notes

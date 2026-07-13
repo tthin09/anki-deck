@@ -1,7 +1,0 @@
-{
-  "gemini_api_key": "AQ.Ab8RN6KG8ESfSL4-kIZ046pmU9_DldZutGJ-q6MzXGi2GmaLSw",
-  "model": "gemini-3.5-flash",
-  "anki_connect_url": "http://127.0.0.1:8765",
-  "chunk_size": 30,
-  "deck_name": "English Vocabulary"
-}
