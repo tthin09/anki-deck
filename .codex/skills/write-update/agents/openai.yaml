@@ -1,0 +1,4 @@
+interface:
+  display_name: "Write Update"
+  short_description: "Turn release bullets into polished update logs"
+  default_prompt: "Use $write-update to turn these release bullets into a concise, natural-language update log."
