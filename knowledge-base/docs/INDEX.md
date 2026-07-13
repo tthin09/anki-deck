@@ -1,3 +1,12 @@
+### [2026-07-13] - [50-word audio smoke test](audio-smoke-test/context.md)
+* **Status:** Completed.
+* **Changed:** Added a live test that resolves and fetches audio for 50 common English words.
+* **Context:** Audio fallback coverage can be checked quickly against real provider URLs.
+* **Touched:** `test/test_audio_50_words.py`
+* **Interfaces:** None.
+* **Verified:** Live run passed 50/50 words.
+* **Follow-ups:** None.
+
 ### [2026-07-11] - deployment diagnostics
 * **Status:** Completed.
 * **Changed:** Added user-run deployment diagnostics and clearer Vietnamese startup failures.
