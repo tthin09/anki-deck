@@ -24,7 +24,7 @@ Convert rough update bullets into a polished changelog entry and write it to the
 - Write in plain English with short, specific sentences.
 - Prefer "Added support for ..." or "Fixed ..." over commit-message fragments.
 - Keep technical names only when users need them (commands, model names, file formats).
-- Do not include commit hashes, internal speculation, or a separate “What changed” preamble.
+- Do not include commit hashes, internal speculation, or a separate "What changed" preamble.
 
 ### Example
 
