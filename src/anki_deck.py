@@ -137,7 +137,7 @@ def load_config(root: Path) -> dict:
         raise RuntimeError("Không đọc được src/config.json. Hãy kiểm tra file JSON và quyền truy cập.") from exc
     if not config.get("groq_api_key") or config["groq_api_key"].startswith("YOUR_"):
         raise RuntimeError("Chưa cấu hình groq_api_key trong config.json.")
-    config.setdefault("model", "llama-4-scout-17b-16e-instruct")
+    config.setdefault("model", "openai/gpt-oss-20b")
     config.setdefault("deck_name", "English Vocabulary")
     config.setdefault("anki_connect_url", "http://127.0.0.1:8765")
     config.setdefault("chunk_size", 30)
@@ -336,14 +336,17 @@ def groq_json(items: list[dict | str], prompt: str, schema: dict, config: dict) 
             response = post_json(
                 url,
                 payload,
-                headers={"Authorization": f"Bearer {config['groq_api_key']}"},
+                headers={
+                    "Authorization": f"Bearer {config['groq_api_key']}",
+                    "User-Agent": "anki-deck/1.0",
+                },
                 timeout=30,
             )
             break
         except RuntimeError as exc:
             last_error = exc
             if attempt == 3 or not is_busy_ai_error(exc):
-                raise RuntimeError(f"Gemini API không xác thực được hoặc đã thất bại: {exc}") from exc
+                raise RuntimeError(f"Groq API không xác thực được hoặc đã thất bại: {exc}") from exc
             log_step_progress()
             msg("Đang chạy", f"Dịch vụ AI đang quá tải. Tự động thử lại lần {attempt + 1}/3...")
             time.sleep(2 * (attempt + 1))
