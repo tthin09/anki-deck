@@ -32,3 +32,14 @@ LƯU Ý
 - File Excel chỉ dùng để kiểm tra nội dung; thẻ vẫn được thêm vào Anki tự động.
 - Nếu không tìm thấy audio cho một từ, chương trình sẽ cảnh báo nhưng vẫn tạo thẻ không có âm thanh.
 - Audio sẽ tự động phát khi mặt thẻ có âm thanh xuất hiện; thẻ không hiển thị nguồn audio.
+
+CẬP NHẬT CHƯƠNG TRÌNH
+1. Đóng run.exe và migrate.exe nếu đang mở.
+2. Nhấp đúp update.cmd.
+3. Chờ thông báo cập nhật hoàn tất. Không cần cài Git hoặc Python.
+- File cấu hình, từ vựng trong input và file Excel đã tạo trong vocabulary được giữ nguyên.
+
+NẾU AUDIO KHÔNG CHẠY TRÊN ĐIỆN THOẠI
+- Bật đồng bộ âm thanh/hình ảnh trên Anki máy tính và điện thoại.
+- Chờ đồng bộ media hoàn tất trên cả hai thiết bị, rồi chạy Check Media trên Anki máy tính.
+- Audio mới được lưu ở định dạng MP3 để tương thích với AnkiMobile và AnkiDroid.

@@ -105,3 +105,12 @@
 * **Interfaces:** Gemini attempts use a 30-second timeout and up to three automatic retries.
 * **Verified:** Retry classification/progress self-tests and packaged self-test.
 * **Follow-ups:** None.
+
+### [2026-07-13] - [release updater and mobile-safe audio](release-updater-mobile-audio/context.md)
+* **Status:** Completed.
+* **Changed:** Added a GitHub Actions release build, one-click PowerShell updater, MP3-only audio filtering, mobile sync guidance, and config-secret protection.
+* **Context:** End users can update without Git/Python, while new and migrated audio stays in the most portable Anki media format.
+* **Touched:** `.github/workflows/release.yml`, `update.cmd`, `update.ps1`, `src/anki_deck.py`, `src/README.md`, `HUONG-DAN.txt`
+* **Interfaces:** Releases publish `anki-deck-runtime.zip`; the updater preserves `src/config.json`, `input/`, and generated `vocabulary/` files.
+* **Verified:** Source self-tests, packaged self-tests, Python compilation, and PowerShell syntax parsing.
+* **Follow-ups:** Rotate the previously committed Gemini credential before publishing the first release.

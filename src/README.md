@@ -28,6 +28,8 @@ Gemini calls time out after 30 seconds. Transient overload and connection failur
 - `input/` — user vocabulary text files, one item per line.
 - `vocabulary/template.xlsx` — workbook template.
 - `run.exe` — PyInstaller Windows executable.
+- `migrate.exe` — legacy-card audio migration executable.
+- `update.cmd` — one-click user updater; no Git or Python required.
 - `KIEM-TRA.cmd` — user-facing deployment diagnostics.
 
 ## External services
@@ -55,6 +57,12 @@ python src\anki_deck.py --no-pause
 
 Copy `src/config.example.json` to `src/config.json`, then replace `YOUR_OWN_GEMINI_API_KEY`. Do not expose the key in source control or a shared ZIP.
 
+## Update the packaged app
+
+End users should close `run.exe` and `migrate.exe`, then double-click `update.cmd`. It downloads the latest `anki-deck-runtime.zip` release from GitHub using Windows PowerShell. Git, Python, and developer dependencies are not required. The updater preserves `src/config.json`, `input/`, and generated files in `vocabulary/`.
+
+Maintainers publish a release by pushing a tag such as `v1.0.0`. GitHub Actions builds and self-tests both executables, then attaches the runtime ZIP to the GitHub release. Do not use `git pull` as the end-user update path because user configuration and input are local data.
+
 ## Diagnostics
 
 Run `KIEM-TRA.cmd` or:
@@ -76,7 +84,7 @@ migrate.exe --self-test --no-pause
 
 Reverse answers try their displayed form first, then a unique normal-card base matched through common English inflections. Ambiguous, irregular, malformed, and audio-less notes are reported without modification. The migration is safe to rerun.
 
-## Build `run.exe`
+## Build and publish (maintainers)
 
 ```powershell
 python -m PyInstaller --onefile --console --name run --clean --noconfirm src\anki_deck.py
@@ -90,19 +98,22 @@ python -m PyInstaller --onefile --console --name migrate --clean --noconfirm src
 Copy-Item -Force dist\migrate.exe .\migrate.exe
 ```
 
-Verify the packaged artifact:
+Verify the packaged artifacts:
 
 ```powershell
 .\run.exe --self-test --no-pause
 .\run.exe --diagnose --no-pause
+.\migrate.exe --self-test --no-pause
 ```
 
-Distribute the whole project runtime folder as a ZIP, including `run.exe`, `src/`, `input/`, `vocabulary/template.xlsx`, `HUONG-DAN.txt`, and `KIEM-TRA.cmd`. The executable is unsigned, so Windows SmartScreen may warn users.
+The release workflow packages only runtime resources and `vocabulary/template.xlsx`; it never packages `src/config.json`, input files, or generated workbooks. The executable is unsigned, so Windows SmartScreen may warn users.
 
 ## Audio behavior
 
 - Lookups are cached case-insensitively for one run.
 - Media filenames are deterministic URL hashes, preventing unsafe characters and collisions.
-- Only HTTPS audio URLs are accepted.
+- Only HTTPS MP3 audio URLs, plus extensionless URLs known to return MP3, are accepted. Other formats fall through to the next audio source because MP3 is the most portable mobile format.
 - DictionaryAPI 404, 429, network, and malformed-response failures continue to Wiktionary, then Google Translate TTS; remaining failures do not stop card creation.
 - The app enables Anki's native autoplay for the configured deck preset; normal replay controls remain available and no custom model or JavaScript is required.
+
+If audio works on desktop but not mobile, enable sound/image syncing on both devices, complete the media sync, and run Anki's Check Media before testing playback.
