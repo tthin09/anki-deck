@@ -16,8 +16,8 @@ from anki_deck import (  # noqa: E402
     anki,
     chunks,
     enrich_audio,
-    gemini_cards,
-    gemini_reverse_cards,
+    groq_cards,
+    groq_reverse_cards,
     google_tts_audio,
     load_config,
     shuffled,
@@ -78,11 +78,11 @@ def main() -> int:
 
     cards = []
     for batch in chunks(words, int(config["chunk_size"])):
-        cards.extend(gemini_cards(batch, prompt, config))
+        cards.extend(groq_cards(batch, prompt, config))
 
     reverse_cards = []
     for batch in chunks(cards, int(config["chunk_size"])):
-        reverse_cards.extend(gemini_reverse_cards(batch, reverse_prompt, config))
+        reverse_cards.extend(groq_reverse_cards(batch, reverse_prompt, config))
 
     enrich_audio(cards, reverse_cards)
     verify_card_audio(cards)

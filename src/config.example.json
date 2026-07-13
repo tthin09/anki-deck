@@ -1,7 +1,7 @@
 {
-  "gemini_api_key": "YOUR_OWN_GEMINI_API_KEY",
-  "model": "gemini-3.5-flash",
-  "deck_name": "English Vocabulary",
+  "groq_api_key": "YOUR_GROQ_API_KEY",
+  "model": "llama-4-scout-17b-16e-instruct",
   "anki_connect_url": "http://127.0.0.1:8765",
-  "chunk_size": 30
+  "chunk_size": 10,
+  "deck_name": "English Vocabulary"
 }

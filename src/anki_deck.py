@@ -135,9 +135,9 @@ def load_config(root: Path) -> dict:
         config = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise RuntimeError("Không đọc được src/config.json. Hãy kiểm tra file JSON và quyền truy cập.") from exc
-    if not config.get("gemini_api_key") or config["gemini_api_key"].startswith("YOUR_"):
-        raise RuntimeError("Chưa cấu hình gemini_api_key trong config.json.")
-    config.setdefault("model", "gemini-3.5-flash")
+    if not config.get("groq_api_key") or config["groq_api_key"].startswith("YOUR_"):
+        raise RuntimeError("Chưa cấu hình groq_api_key trong config.json.")
+    config.setdefault("model", "llama-4-scout-17b-16e-instruct")
     config.setdefault("deck_name", "English Vocabulary")
     config.setdefault("anki_connect_url", "http://127.0.0.1:8765")
     config.setdefault("chunk_size", 30)
@@ -315,26 +315,20 @@ def is_busy_ai_error(exc: RuntimeError) -> bool:
     return "Không thể kết nối" in str(exc) or any(f"({code})" in str(exc) for code in (429, 500, 502, 503, 504))
 
 
-def gemini_json(items: list[dict | str], prompt: str, schema: dict, config: dict) -> dict:
-    model = quote(config["model"], safe="")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+def groq_json(items: list[dict | str], prompt: str, schema: dict, config: dict) -> dict:
+    model = config["model"]
+    url = "https://api.groq.com/openai/v1/chat/completions"
     payload = {
-        "contents": [
+        "model": model,
+        "messages": [
             {
                 "role": "user",
-                "parts": [
-                    {
-                        "text": prompt
-                        + "\n\nInput data as JSON array:\n"
-                        + json.dumps(items, ensure_ascii=False)
-                    }
-                ],
+                "content": prompt
+                + "\n\nReturn only valid JSON. Input data as JSON array:\n"
+                + json.dumps(items, ensure_ascii=False),
             }
         ],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "responseJsonSchema": schema,
-        },
+        "response_format": {"type": "json_object"},
     }
     last_error = None
     for attempt in range(4):
@@ -342,7 +336,7 @@ def gemini_json(items: list[dict | str], prompt: str, schema: dict, config: dict
             response = post_json(
                 url,
                 payload,
-                headers={"x-goog-api-key": config["gemini_api_key"]},
+                headers={"Authorization": f"Bearer {config['groq_api_key']}"},
                 timeout=30,
             )
             break
@@ -356,18 +350,18 @@ def gemini_json(items: list[dict | str], prompt: str, schema: dict, config: dict
     else:
         raise last_error
     try:
-        text = response["candidates"][0]["content"]["parts"][0]["text"]
+        text = response["choices"][0]["message"]["content"]
         return json.loads(text)
     except (KeyError, IndexError, json.JSONDecodeError) as exc:
         raise RuntimeError("AI trả về dữ liệu không đọc được. Chưa thêm thẻ vào Anki.") from exc
 
 
-def gemini_cards(words: list[str], prompt: str, config: dict) -> list[dict]:
-    data = gemini_json(words, prompt, CARD_SCHEMA, config)
+def groq_cards(words: list[str], prompt: str, config: dict) -> list[dict]:
+    data = groq_json(words, prompt, CARD_SCHEMA, config)
     return validate_cards(data)
 
 
-def gemini_reverse_cards(cards: list[dict], prompt: str, config: dict) -> list[dict]:
+def groq_reverse_cards(cards: list[dict], prompt: str, config: dict) -> list[dict]:
     items = [
         {
             "word": card["word"],
@@ -378,7 +372,7 @@ def gemini_reverse_cards(cards: list[dict], prompt: str, config: dict) -> list[d
         }
         for card in cards
     ]
-    data = gemini_json(items, prompt, REVERSE_SCHEMA, config)
+    data = groq_json(items, prompt, REVERSE_SCHEMA, config)
     return validate_reverse_cards(cards, data)
 
 
@@ -809,9 +803,9 @@ def run_diagnostics(root: Path) -> int:
             "required": ["ok"],
         }
         check(
-            "Gemini API (yêu cầu thử tối thiểu)",
+            "Groq API (yêu cầu thử tối thiểu)",
             lambda: "khóa, mạng và model hoạt động"
-            if gemini_json(["test"], "Return {\"ok\": true}.", schema, config).get("ok") is True
+            if groq_json(["test"], "Return {\"ok\": true}.", schema, config).get("ok") is True
             else (_ for _ in ()).throw(RuntimeError("phản hồi thử không hợp lệ")),
         )
         check("AnkiConnect", lambda: f"version {anki('version', None, config)}")
@@ -867,12 +861,12 @@ def main() -> int:
         word_batches = chunks(words, int(config["chunk_size"]))
         for index, batch in enumerate(word_batches, start=1):
             with timed_step(f"Dùng AI tạo thẻ từ vựng, đợt {index}/{len(word_batches)} ({len(batch)} từ)"):
-                all_cards.extend(gemini_cards(batch, prompt, config))
+                all_cards.extend(groq_cards(batch, prompt, config))
         all_reverse_cards: list[dict] = []
         reverse_batches = chunks(all_cards, int(config["chunk_size"]))
         for index, batch in enumerate(reverse_batches, start=1):
             with timed_step(f"Dùng AI tạo thẻ luyện tập, đợt {index}/{len(reverse_batches)} ({len(batch)} từ)"):
-                all_reverse_cards.extend(gemini_reverse_cards(batch, reverse_prompt, config))
+                all_reverse_cards.extend(groq_reverse_cards(batch, reverse_prompt, config))
         with timed_step("Lấy audio phát âm từ DictionaryAPI"):
             enrich_audio(all_cards, all_reverse_cards)
         with timed_step("Tạo file Excel"):
