@@ -317,7 +317,7 @@ def is_busy_ai_error(exc: RuntimeError) -> bool:
 
 def gemini_json(items: list[dict | str], prompt: str, schema: dict, config: dict) -> dict:
     model = quote(config["model"], safe="")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={quote(config['gemini_api_key'])}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     payload = {
         "contents": [
             {
@@ -339,16 +339,17 @@ def gemini_json(items: list[dict | str], prompt: str, schema: dict, config: dict
     last_error = None
     for attempt in range(4):
         try:
-            response = post_json(url, payload, timeout=30)
+            response = post_json(
+                url,
+                payload,
+                headers={"x-goog-api-key": config["gemini_api_key"]},
+                timeout=30,
+            )
             break
         except RuntimeError as exc:
             last_error = exc
             if attempt == 3 or not is_busy_ai_error(exc):
-                raise RuntimeError(
-                    "Dịch vụ AI đang quá tải hoặc tạm thời bị lỗi. Đây là lỗi từ nhà cung cấp AI, "
-                    "không phải do bạn. Hãy thử chạy lại sau vài phút. "
-                    f"Chi tiết: {exc}"
-                ) from exc
+                raise RuntimeError(f"Gemini API không xác thực được hoặc đã thất bại: {exc}") from exc
             log_step_progress()
             msg("Đang chạy", f"Dịch vụ AI đang quá tải. Tự động thử lại lần {attempt + 1}/3...")
             time.sleep(2 * (attempt + 1))
