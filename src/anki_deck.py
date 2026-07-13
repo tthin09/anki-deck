@@ -328,7 +328,6 @@ def groq_json(items: list[dict | str], prompt: str, schema: dict, config: dict) 
                 + json.dumps(items, ensure_ascii=False),
             }
         ],
-        "response_format": {"type": "json_object"},
     }
     last_error = None
     for attempt in range(4):
