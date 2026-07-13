@@ -1,11 +1,11 @@
 ### [2026-07-13] - [50-word audio smoke test](audio-smoke-test/context.md)
 * **Status:** Completed.
-* **Changed:** Added a live test that resolves/fetches audio for 50 common English words, creates a test deck, configures 200 new cards/day, and adds the notes.
-* **Context:** Audio fallback and AnkiConnect note/media setup can be checked together against real services.
-* **Touched:** `test/test_audio_50_words.py`
-* **Interfaces:** None.
-* **Verified:** Live run passed 50/50 words and added 50 notes to `English Vocab [Test]`.
-* **Follow-ups:** None.
+* **Changed:** Renamed the live test to `test_new_N_words.py`; it now follows the production AI normal/reverse prompt flow, recreates a test deck, configures 200 new cards/day, and adds complete notes.
+* **Context:** A selectable number of the 50 test words can exercise AI card generation, reverse practice cards, audio, and AnkiConnect together.
+* **Touched:** `test/test_new_N_words.py`
+* **Interfaces:** CLI argument: `python test/test_new_N_words.py <1-50>`.
+* **Verified:** Help and invalid-count validation; live execution requires AnkiConnect.
+* **Follow-ups:** Start Anki with AnkiConnect before running the live workflow.
 
 ### [2026-07-11] - deployment diagnostics
 * **Status:** Completed.
