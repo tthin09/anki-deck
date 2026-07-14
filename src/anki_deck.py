@@ -578,6 +578,46 @@ def add_to_anki(cards: list[dict], reverse_cards: list[dict], config: dict) -> i
     return len([note_id for note_id in result if note_id])
 
 
+def check_anki(config: dict) -> None:
+    try:
+        anki("version", None, config)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "Anki chưa được mở hoặc AnkiConnect chưa hoạt động. "
+            "Hãy mở Anki, cài add-on 2055492159 nếu cần, rồi chạy lại run.exe."
+        ) from exc
+
+
+def generate_and_add(
+    root: Path,
+    config: dict,
+    words: list[str],
+    prompt: str,
+    reverse_prompt: str,
+    deck_name: str | None = None,
+) -> int:
+    all_cards: list[dict] = []
+    word_batches = chunks(words, int(config["chunk_size"]))
+    for index, batch in enumerate(word_batches, start=1):
+        with timed_step(f"Dùng AI tạo thẻ từ vựng, đợt {index}/{len(word_batches)} ({len(batch)} từ)"):
+            all_cards.extend(gemini_cards(batch, prompt, config))
+    all_reverse_cards: list[dict] = []
+    reverse_batches = chunks(all_cards, int(config["chunk_size"]))
+    for index, batch in enumerate(reverse_batches, start=1):
+        with timed_step(f"Dùng AI tạo thẻ luyện tập, đợt {index}/{len(reverse_batches)} ({len(batch)} từ)"):
+            all_reverse_cards.extend(gemini_reverse_cards(batch, reverse_prompt, config))
+    with timed_step("Lấy audio phát âm từ DictionaryAPI"):
+        enrich_audio(all_cards, all_reverse_cards)
+    with timed_step("Tạo file Excel"):
+        excel_path = write_excel(root, all_cards, all_reverse_cards)
+    msg("OK", f"File Excel: {excel_path.relative_to(root)}")
+    add_config = {**config, "deck_name": deck_name} if deck_name else config
+    with timed_step("Thêm thẻ và audio vào Anki"):
+        added = add_to_anki(all_cards, all_reverse_cards, add_config)
+    msg("OK", f"Đã thêm {added} thẻ vào Anki.")
+    return added
+
+
 def run_self_test() -> None:
     sample = {
         "cards": [
@@ -855,31 +895,8 @@ def main() -> int:
             prompt = (src_dir(root) / "agent-prompt.md").read_text(encoding="utf-8")
             reverse_prompt = (src_dir(root) / "reverse-prompt.md").read_text(encoding="utf-8")
         with timed_step("Kiểm tra Anki và AnkiConnect"):
-            try:
-                anki("version", None, config)
-            except RuntimeError as exc:
-                raise RuntimeError(
-                    "Anki chưa được mở hoặc AnkiConnect chưa hoạt động. "
-                    "Hãy mở Anki, cài add-on 2055492159 nếu cần, rồi chạy lại run.exe."
-                ) from exc
-        all_cards: list[dict] = []
-        word_batches = chunks(words, int(config["chunk_size"]))
-        for index, batch in enumerate(word_batches, start=1):
-            with timed_step(f"Dùng AI tạo thẻ từ vựng, đợt {index}/{len(word_batches)} ({len(batch)} từ)"):
-                all_cards.extend(gemini_cards(batch, prompt, config))
-        all_reverse_cards: list[dict] = []
-        reverse_batches = chunks(all_cards, int(config["chunk_size"]))
-        for index, batch in enumerate(reverse_batches, start=1):
-            with timed_step(f"Dùng AI tạo thẻ luyện tập, đợt {index}/{len(reverse_batches)} ({len(batch)} từ)"):
-                all_reverse_cards.extend(gemini_reverse_cards(batch, reverse_prompt, config))
-        with timed_step("Lấy audio phát âm từ DictionaryAPI"):
-            enrich_audio(all_cards, all_reverse_cards)
-        with timed_step("Tạo file Excel"):
-            excel_path = write_excel(root, all_cards, all_reverse_cards)
-        msg("OK", f"File Excel: {excel_path.relative_to(root)}")
-        with timed_step("Thêm thẻ và audio vào Anki"):
-            added = add_to_anki(all_cards, all_reverse_cards, config)
-        msg("OK", f"Đã thêm {added} thẻ vào Anki.")
+            check_anki(config)
+        generate_and_add(root, config, words, prompt, reverse_prompt)
         return 0
     except (RuntimeError, HTTPError) as exc:
         msg("Lỗi", str(exc))

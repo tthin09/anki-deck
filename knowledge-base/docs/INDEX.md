@@ -123,3 +123,12 @@
 * **Interfaces:** Existing `model` config field and Gemini request format retained.
 * **Verified:** Source self-test passed; test script confirmed to contain 50 words.
 * **Follow-ups:** None.
+
+### [2026-07-14] - [Test workflow alignment](gemini-model-config/context.md)
+* **Status:** Completed.
+* **Changed:** Test runs now reuse the production AI, audio, Excel, progress, and Anki-add workflow while resetting only the Test deck.
+* **Context:** Timeout/retry progress is now visible at the same stage and with the same behavior as the main run.
+* **Touched:** `src/anki_deck.py`, `test/test_new_N_words.py`
+* **Interfaces:** Shared internal workflow helpers; Test deck remains `English Vocab [Test]`.
+* **Verified:** Python compilation, source self-test, and test-script help command.
+* **Follow-ups:** Live test intentionally not run because it deletes and recreates the Test deck.
