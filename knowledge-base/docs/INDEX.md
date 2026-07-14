@@ -150,3 +150,12 @@
 * **Interfaces:** Console output gains progress lines; audio behavior and payloads are unchanged.
 * **Verified:** Source self-test, Python compilation, test-script help, and diff validation.
 * **Follow-ups:** None.
+
+### [2026-07-14] - [Wikimedia audio download throttling](audio-429/context.md)
+* **Status:** Documented; implementation intentionally unchanged.
+* **Changed:** Documented the Wikimedia transcoded-MP3 HTTP 429 failure and proposed application-side media prefetch with bounded retry and AnkiConnect `storeMediaFile`.
+* **Context:** AnkiConnect currently downloads selected remote audio URLs after source resolution; a rate-limited Wikimedia URL can therefore produce a card without a replay button.
+* **Touched:** `knowledge-base/docs/audio-429/context.md`
+* **Interfaces:** No application interface changed.
+* **Verified:** Current source flow and reported failure reviewed.
+* **Follow-ups:** Implement the prefetch/retry design separately.
