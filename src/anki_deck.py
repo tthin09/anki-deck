@@ -270,20 +270,40 @@ def google_tts_audio(text: str) -> dict | None:
     return audio_metadata(url)
 
 
-def resolve_audio(text: str, sources=None, trace: list[str] | None = None) -> dict | None:
+def resolve_audio(
+    text: str,
+    sources=None,
+    trace: list[str] | None = None,
+    announce: bool = False,
+) -> dict | None:
     for source in sources or (dictionary_audio, wiktionary_audio, google_tts_audio):
+        name = {
+            "paced_dictionary_audio": "DictionaryAPI",
+            "dictionary_audio": "DictionaryAPI",
+            "wiktionary_audio": "Wiktionary",
+            "google_tts_audio": "Google TTS",
+        }.get(source.__name__, source.__name__)
+        started = time.perf_counter()
+        if announce:
+            msg("Đang chạy", f"Audio '{text}': thử {name}...")
         try:
             audio = source(text)
         except RuntimeError as exc:
             if trace is not None:
                 trace.append(f"{source.__name__}: error ({exc})")
+            if announce:
+                msg("Cảnh báo", f"Audio '{text}': {name} lỗi sau {time.perf_counter() - started:.1f}s.")
             continue
         if audio:
             if trace is not None:
                 trace.append(f"{source.__name__}: audio found")
+            if announce:
+                msg("OK", f"Audio '{text}': {name} đã có sau {time.perf_counter() - started:.1f}s.")
             return audio
         if trace is not None:
             trace.append(f"{source.__name__}: no audio")
+        if announce:
+            msg("Đang chạy", f"Audio '{text}': {name} không có audio sau {time.perf_counter() - started:.1f}s.")
     return None
 
 
@@ -296,19 +316,29 @@ def enrich_audio(cards: list[dict], reverse_cards: list[dict]) -> None:
         nonlocal next_dictionary_request
         delay = next_dictionary_request - time.monotonic()
         if delay > 0:
+            msg("Đang chạy", f"Audio '{text}': chờ DictionaryAPI {delay:.1f}s để giữ giới hạn request...")
             time.sleep(delay)
         next_dictionary_request = time.monotonic() + 2.5
         return dictionary_audio(text)
 
+    lookup_count = 0
+    total_lookups = len(cards) + len(reverse_cards)
+
     def lookup(text: str) -> dict | None:
+        nonlocal lookup_count
+        lookup_count += 1
         key = text.casefold()
+        msg("Đang chạy", f"Audio {lookup_count}/{total_lookups}: '{text}'...")
         if key not in cache:
             trace_cache[key] = []
             cache[key] = resolve_audio(
                 text,
                 (paced_dictionary_audio, wiktionary_audio, google_tts_audio),
                 trace_cache[key],
+                announce=True,
             )
+        else:
+            msg("Đang chạy", f"Audio '{text}': dùng kết quả đã lưu.")
         return cache[key]
 
     by_word = {}
@@ -731,6 +761,11 @@ def run_self_test() -> None:
     assert resolve_audio("word", (missing_source, missing_source, unused_source), trace)["filename"] == "tts.mp3"
     assert calls == ["missing", "missing", "tts"]
     assert trace == ["missing_source: no audio", "missing_source: no audio", "unused_source: audio found"]
+    progress = StringIO()
+    with redirect_stdout(progress):
+        assert resolve_audio("progress", (unused_source,), announce=True)["filename"] == "tts.mp3"
+    assert "Audio 'progress': thử unused_source..." in progress.getvalue()
+    assert "Audio 'progress': unused_source đã có sau" in progress.getvalue()
     assert google_tts_audio("two words")["url"].endswith("q=two%20words")
     normal_note = anki_note("Deck", "front", "back", ["ai-vocab"], audio, "Front")
     reverse_note = anki_note("Deck", "front", "back", ["reverse"], audio, "Back")

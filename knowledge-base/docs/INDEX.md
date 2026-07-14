@@ -141,3 +141,12 @@
 * **Interfaces:** Missing-audio warnings now identify source results/errors; cards remain non-fatal.
 * **Verified:** Source self-test passed; official API examples and live response variants reviewed.
 * **Follow-ups:** Keep MP3-only filtering for mobile compatibility and use the trace to guide further fixes.
+
+### [2026-07-14] - [Audio progress logging](audio-diagnostics/context.md)
+* **Status:** Completed.
+* **Changed:** Added per-word and per-provider audio progress, elapsed times, cache-hit messages, and visible DictionaryAPI pacing waits.
+* **Context:** Users can now distinguish rate-limit waits, provider calls, fallback work, and actual stalls.
+* **Touched:** `src/anki_deck.py`
+* **Interfaces:** Console output gains progress lines; audio behavior and payloads are unchanged.
+* **Verified:** Source self-test, Python compilation, test-script help, and diff validation.
+* **Follow-ups:** None.
