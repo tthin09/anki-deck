@@ -270,19 +270,26 @@ def google_tts_audio(text: str) -> dict | None:
     return audio_metadata(url)
 
 
-def resolve_audio(text: str, sources=None) -> dict | None:
+def resolve_audio(text: str, sources=None, trace: list[str] | None = None) -> dict | None:
     for source in sources or (dictionary_audio, wiktionary_audio, google_tts_audio):
         try:
             audio = source(text)
-        except RuntimeError:
+        except RuntimeError as exc:
+            if trace is not None:
+                trace.append(f"{source.__name__}: error ({exc})")
             continue
         if audio:
+            if trace is not None:
+                trace.append(f"{source.__name__}: audio found")
             return audio
+        if trace is not None:
+            trace.append(f"{source.__name__}: no audio")
     return None
 
 
 def enrich_audio(cards: list[dict], reverse_cards: list[dict]) -> None:
     cache: dict[str, dict | None] = {}
+    trace_cache: dict[str, list[str]] = {}
     next_dictionary_request = 0.0
 
     def paced_dictionary_audio(text: str) -> dict | None:
@@ -296,19 +303,32 @@ def enrich_audio(cards: list[dict], reverse_cards: list[dict]) -> None:
     def lookup(text: str) -> dict | None:
         key = text.casefold()
         if key not in cache:
-            cache[key] = resolve_audio(text, (paced_dictionary_audio, wiktionary_audio, google_tts_audio))
+            trace_cache[key] = []
+            cache[key] = resolve_audio(
+                text,
+                (paced_dictionary_audio, wiktionary_audio, google_tts_audio),
+                trace_cache[key],
+            )
         return cache[key]
 
     by_word = {}
     for card in cards:
         card["audio"] = lookup(card["word"])
         if card["audio"] is None:
-            msg("Cảnh báo", f"Không tìm thấy audio cho '{card['word']}'. Thẻ vẫn được tạo không có âm thanh.")
+            msg(
+                "Cảnh báo",
+                f"Không tìm thấy audio cho '{card['word']}' sau: {'; '.join(trace_cache[card['word'].casefold()])}. "
+                "Thẻ vẫn được tạo không có âm thanh.",
+            )
         by_word[card["word"].casefold()] = card["audio"]
     for reverse in reverse_cards:
         reverse["audio"] = lookup(reverse["answer"]) or by_word.get(reverse["word"].casefold())
         if reverse["audio"] is None:
-            msg("Cảnh báo", f"Không tìm thấy audio cho đáp án '{reverse['answer']}'.")
+            msg(
+                "Cảnh báo",
+                f"Không tìm thấy audio cho đáp án '{reverse['answer']}' sau: "
+                f"{'; '.join(trace_cache[reverse['answer'].casefold()])}.",
+            )
 
 
 def is_busy_ai_error(exc: RuntimeError) -> bool:
@@ -707,8 +727,10 @@ def run_self_test() -> None:
     assert resolve_audio("word", (missing_source, backup_source, unused_source))["filename"] == "backup.mp3"
     assert calls == ["missing", "backup"]
     calls.clear()
-    assert resolve_audio("word", (missing_source, missing_source, unused_source))["filename"] == "tts.mp3"
+    trace = []
+    assert resolve_audio("word", (missing_source, missing_source, unused_source), trace)["filename"] == "tts.mp3"
     assert calls == ["missing", "missing", "tts"]
+    assert trace == ["missing_source: no audio", "missing_source: no audio", "unused_source: audio found"]
     assert google_tts_audio("two words")["url"].endswith("q=two%20words")
     normal_note = anki_note("Deck", "front", "back", ["ai-vocab"], audio, "Front")
     reverse_note = anki_note("Deck", "front", "back", ["reverse"], audio, "Back")
