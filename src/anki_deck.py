@@ -137,7 +137,7 @@ def load_config(root: Path) -> dict:
         raise RuntimeError("Không đọc được src/config.json. Hãy kiểm tra file JSON và quyền truy cập.") from exc
     if not config.get("gemini_api_key") or config["gemini_api_key"].startswith("YOUR_"):
         raise RuntimeError("Chưa cấu hình gemini_api_key trong config.json.")
-    config.setdefault("model", "gemini-3.5-flash")
+    config.setdefault("model", "gemini-3.1-flash-lite")
     config.setdefault("deck_name", "English Vocabulary")
     config.setdefault("anki_connect_url", "http://127.0.0.1:8765")
     config.setdefault("chunk_size", 30)

@@ -114,3 +114,12 @@
 * **Interfaces:** Releases publish `anki-deck-runtime.zip`; the updater preserves `src/config.json`, `input/`, and generated `vocabulary/` files.
 * **Verified:** Source self-tests, packaged self-tests, Python compilation, and PowerShell syntax parsing.
 * **Follow-ups:** Rotate the previously committed Gemini credential before publishing the first release.
+
+### [2026-07-14] - [Gemini model configuration](gemini-model-config/context.md)
+* **Status:** Completed.
+* **Changed:** Switched the default and example Gemini model to `gemini-3.1-flash-lite`; the local config was updated too.
+* **Context:** Keeps the existing Gemini workflow while selecting the higher-capacity Flash-Lite model.
+* **Touched:** `src/anki_deck.py`, `src/config.example.json`, `src/config.json`
+* **Interfaces:** Existing `model` config field and Gemini request format retained.
+* **Verified:** Source self-test passed; test script confirmed to contain 50 words.
+* **Follow-ups:** None.
