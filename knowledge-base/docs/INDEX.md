@@ -132,3 +132,12 @@
 * **Interfaces:** Shared internal workflow helpers; Test deck remains `English Vocab [Test]`.
 * **Verified:** Python compilation, source self-test, and test-script help command.
 * **Follow-ups:** Live test intentionally not run because it deletes and recreates the Test deck.
+
+### [2026-07-14] - [Audio response diagnostics](audio-diagnostics/context.md)
+* **Status:** Completed.
+* **Changed:** Added per-word tracing across all audio sources and documented DictionaryAPI response variants.
+* **Context:** The endpoint does not guarantee an audio URL for every valid dictionary entry; response fields and media formats vary.
+* **Touched:** `src/anki_deck.py`
+* **Interfaces:** Missing-audio warnings now identify source results/errors; cards remain non-fatal.
+* **Verified:** Source self-test passed; official API examples and live response variants reviewed.
+* **Follow-ups:** Keep MP3-only filtering for mobile compatibility and use the trace to guide further fixes.
