@@ -114,3 +114,48 @@
 * **Interfaces:** Releases publish `anki-deck-runtime.zip`; the updater preserves `src/config.json`, `input/`, and generated `vocabulary/` files.
 * **Verified:** Source self-tests, packaged self-tests, Python compilation, and PowerShell syntax parsing.
 * **Follow-ups:** Rotate the previously committed Gemini credential before publishing the first release.
+
+### [2026-07-14] - [Gemini model configuration](gemini-model-config/context.md)
+* **Status:** Completed.
+* **Changed:** Switched the default and example Gemini model to `gemini-3.1-flash-lite`; the local config was updated too.
+* **Context:** Keeps the existing Gemini workflow while selecting the higher-capacity Flash-Lite model.
+* **Touched:** `src/anki_deck.py`, `src/config.example.json`, `src/config.json`
+* **Interfaces:** Existing `model` config field and Gemini request format retained.
+* **Verified:** Source self-test passed; test script confirmed to contain 50 words.
+* **Follow-ups:** None.
+
+### [2026-07-14] - [Test workflow alignment](gemini-model-config/context.md)
+* **Status:** Completed.
+* **Changed:** Test runs now reuse the production AI, audio, Excel, progress, and Anki-add workflow while resetting only the Test deck.
+* **Context:** Timeout/retry progress is now visible at the same stage and with the same behavior as the main run.
+* **Touched:** `src/anki_deck.py`, `test/test_new_N_words.py`
+* **Interfaces:** Shared internal workflow helpers; Test deck remains `English Vocab [Test]`.
+* **Verified:** Python compilation, source self-test, and test-script help command.
+* **Follow-ups:** Live test intentionally not run because it deletes and recreates the Test deck.
+
+### [2026-07-14] - [Audio response diagnostics](audio-diagnostics/context.md)
+* **Status:** Completed.
+* **Changed:** Added per-word tracing across all audio sources and documented DictionaryAPI response variants.
+* **Context:** The endpoint does not guarantee an audio URL for every valid dictionary entry; response fields and media formats vary.
+* **Touched:** `src/anki_deck.py`
+* **Interfaces:** Missing-audio warnings now identify source results/errors; cards remain non-fatal.
+* **Verified:** Source self-test passed; official API examples and live response variants reviewed.
+* **Follow-ups:** Keep MP3-only filtering for mobile compatibility and use the trace to guide further fixes.
+
+### [2026-07-14] - [Audio progress logging](audio-diagnostics/context.md)
+* **Status:** Completed.
+* **Changed:** Added per-word and per-provider audio progress, elapsed times, cache-hit messages, and visible DictionaryAPI pacing waits.
+* **Context:** Users can now distinguish rate-limit waits, provider calls, fallback work, and actual stalls.
+* **Touched:** `src/anki_deck.py`
+* **Interfaces:** Console output gains progress lines; audio behavior and payloads are unchanged.
+* **Verified:** Source self-test, Python compilation, test-script help, and diff validation.
+* **Follow-ups:** None.
+
+### [2026-07-14] - [Wikimedia audio download throttling](audio-429/context.md)
+* **Status:** Documented; implementation intentionally unchanged.
+* **Changed:** Documented the Wikimedia transcoded-MP3 HTTP 429 failure and proposed application-side media prefetch with bounded retry and AnkiConnect `storeMediaFile`.
+* **Context:** AnkiConnect currently downloads selected remote audio URLs after source resolution; a rate-limited Wikimedia URL can therefore produce a card without a replay button.
+* **Touched:** `knowledge-base/docs/audio-429/context.md`
+* **Interfaces:** No application interface changed.
+* **Verified:** Current source flow and reported failure reviewed.
+* **Follow-ups:** Implement the prefetch/retry design separately.

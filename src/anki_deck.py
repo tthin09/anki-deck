@@ -137,7 +137,7 @@ def load_config(root: Path) -> dict:
         raise RuntimeError("Không đọc được src/config.json. Hãy kiểm tra file JSON và quyền truy cập.") from exc
     if not config.get("gemini_api_key") or config["gemini_api_key"].startswith("YOUR_"):
         raise RuntimeError("Chưa cấu hình gemini_api_key trong config.json.")
-    config.setdefault("model", "gemini-3.5-flash")
+    config.setdefault("model", "gemini-3.1-flash-lite")
     config.setdefault("deck_name", "English Vocabulary")
     config.setdefault("anki_connect_url", "http://127.0.0.1:8765")
     config.setdefault("chunk_size", 30)
@@ -270,45 +270,95 @@ def google_tts_audio(text: str) -> dict | None:
     return audio_metadata(url)
 
 
-def resolve_audio(text: str, sources=None) -> dict | None:
+def resolve_audio(
+    text: str,
+    sources=None,
+    trace: list[str] | None = None,
+    announce: bool = False,
+) -> dict | None:
     for source in sources or (dictionary_audio, wiktionary_audio, google_tts_audio):
+        name = {
+            "paced_dictionary_audio": "DictionaryAPI",
+            "dictionary_audio": "DictionaryAPI",
+            "wiktionary_audio": "Wiktionary",
+            "google_tts_audio": "Google TTS",
+        }.get(source.__name__, source.__name__)
+        started = time.perf_counter()
+        if announce:
+            msg("Đang chạy", f"Audio '{text}': thử {name}...")
         try:
             audio = source(text)
-        except RuntimeError:
+        except RuntimeError as exc:
+            if trace is not None:
+                trace.append(f"{source.__name__}: error ({exc})")
+            if announce:
+                msg("Cảnh báo", f"Audio '{text}': {name} lỗi sau {time.perf_counter() - started:.1f}s.")
             continue
         if audio:
+            if trace is not None:
+                trace.append(f"{source.__name__}: audio found")
+            if announce:
+                msg("OK", f"Audio '{text}': {name} đã có sau {time.perf_counter() - started:.1f}s.")
             return audio
+        if trace is not None:
+            trace.append(f"{source.__name__}: no audio")
+        if announce:
+            msg("Đang chạy", f"Audio '{text}': {name} không có audio sau {time.perf_counter() - started:.1f}s.")
     return None
 
 
 def enrich_audio(cards: list[dict], reverse_cards: list[dict]) -> None:
     cache: dict[str, dict | None] = {}
+    trace_cache: dict[str, list[str]] = {}
     next_dictionary_request = 0.0
 
     def paced_dictionary_audio(text: str) -> dict | None:
         nonlocal next_dictionary_request
         delay = next_dictionary_request - time.monotonic()
         if delay > 0:
+            msg("Đang chạy", f"Audio '{text}': chờ DictionaryAPI {delay:.1f}s để giữ giới hạn request...")
             time.sleep(delay)
         next_dictionary_request = time.monotonic() + 2.5
         return dictionary_audio(text)
 
+    lookup_count = 0
+    total_lookups = len(cards) + len(reverse_cards)
+
     def lookup(text: str) -> dict | None:
+        nonlocal lookup_count
+        lookup_count += 1
         key = text.casefold()
+        msg("Đang chạy", f"Audio {lookup_count}/{total_lookups}: '{text}'...")
         if key not in cache:
-            cache[key] = resolve_audio(text, (paced_dictionary_audio, wiktionary_audio, google_tts_audio))
+            trace_cache[key] = []
+            cache[key] = resolve_audio(
+                text,
+                (paced_dictionary_audio, wiktionary_audio, google_tts_audio),
+                trace_cache[key],
+                announce=True,
+            )
+        else:
+            msg("Đang chạy", f"Audio '{text}': dùng kết quả đã lưu.")
         return cache[key]
 
     by_word = {}
     for card in cards:
         card["audio"] = lookup(card["word"])
         if card["audio"] is None:
-            msg("Cảnh báo", f"Không tìm thấy audio cho '{card['word']}'. Thẻ vẫn được tạo không có âm thanh.")
+            msg(
+                "Cảnh báo",
+                f"Không tìm thấy audio cho '{card['word']}' sau: {'; '.join(trace_cache[card['word'].casefold()])}. "
+                "Thẻ vẫn được tạo không có âm thanh.",
+            )
         by_word[card["word"].casefold()] = card["audio"]
     for reverse in reverse_cards:
         reverse["audio"] = lookup(reverse["answer"]) or by_word.get(reverse["word"].casefold())
         if reverse["audio"] is None:
-            msg("Cảnh báo", f"Không tìm thấy audio cho đáp án '{reverse['answer']}'.")
+            msg(
+                "Cảnh báo",
+                f"Không tìm thấy audio cho đáp án '{reverse['answer']}' sau: "
+                f"{'; '.join(trace_cache[reverse['answer'].casefold()])}.",
+            )
 
 
 def is_busy_ai_error(exc: RuntimeError) -> bool:
@@ -578,6 +628,46 @@ def add_to_anki(cards: list[dict], reverse_cards: list[dict], config: dict) -> i
     return len([note_id for note_id in result if note_id])
 
 
+def check_anki(config: dict) -> None:
+    try:
+        anki("version", None, config)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "Anki chưa được mở hoặc AnkiConnect chưa hoạt động. "
+            "Hãy mở Anki, cài add-on 2055492159 nếu cần, rồi chạy lại run.exe."
+        ) from exc
+
+
+def generate_and_add(
+    root: Path,
+    config: dict,
+    words: list[str],
+    prompt: str,
+    reverse_prompt: str,
+    deck_name: str | None = None,
+) -> int:
+    all_cards: list[dict] = []
+    word_batches = chunks(words, int(config["chunk_size"]))
+    for index, batch in enumerate(word_batches, start=1):
+        with timed_step(f"Dùng AI tạo thẻ từ vựng, đợt {index}/{len(word_batches)} ({len(batch)} từ)"):
+            all_cards.extend(gemini_cards(batch, prompt, config))
+    all_reverse_cards: list[dict] = []
+    reverse_batches = chunks(all_cards, int(config["chunk_size"]))
+    for index, batch in enumerate(reverse_batches, start=1):
+        with timed_step(f"Dùng AI tạo thẻ luyện tập, đợt {index}/{len(reverse_batches)} ({len(batch)} từ)"):
+            all_reverse_cards.extend(gemini_reverse_cards(batch, reverse_prompt, config))
+    with timed_step("Lấy audio phát âm từ DictionaryAPI"):
+        enrich_audio(all_cards, all_reverse_cards)
+    with timed_step("Tạo file Excel"):
+        excel_path = write_excel(root, all_cards, all_reverse_cards)
+    msg("OK", f"File Excel: {excel_path.relative_to(root)}")
+    add_config = {**config, "deck_name": deck_name} if deck_name else config
+    with timed_step("Thêm thẻ và audio vào Anki"):
+        added = add_to_anki(all_cards, all_reverse_cards, add_config)
+    msg("OK", f"Đã thêm {added} thẻ vào Anki.")
+    return added
+
+
 def run_self_test() -> None:
     sample = {
         "cards": [
@@ -667,8 +757,15 @@ def run_self_test() -> None:
     assert resolve_audio("word", (missing_source, backup_source, unused_source))["filename"] == "backup.mp3"
     assert calls == ["missing", "backup"]
     calls.clear()
-    assert resolve_audio("word", (missing_source, missing_source, unused_source))["filename"] == "tts.mp3"
+    trace = []
+    assert resolve_audio("word", (missing_source, missing_source, unused_source), trace)["filename"] == "tts.mp3"
     assert calls == ["missing", "missing", "tts"]
+    assert trace == ["missing_source: no audio", "missing_source: no audio", "unused_source: audio found"]
+    progress = StringIO()
+    with redirect_stdout(progress):
+        assert resolve_audio("progress", (unused_source,), announce=True)["filename"] == "tts.mp3"
+    assert "Audio 'progress': thử unused_source..." in progress.getvalue()
+    assert "Audio 'progress': unused_source đã có sau" in progress.getvalue()
     assert google_tts_audio("two words")["url"].endswith("q=two%20words")
     normal_note = anki_note("Deck", "front", "back", ["ai-vocab"], audio, "Front")
     reverse_note = anki_note("Deck", "front", "back", ["reverse"], audio, "Back")
@@ -855,31 +952,8 @@ def main() -> int:
             prompt = (src_dir(root) / "agent-prompt.md").read_text(encoding="utf-8")
             reverse_prompt = (src_dir(root) / "reverse-prompt.md").read_text(encoding="utf-8")
         with timed_step("Kiểm tra Anki và AnkiConnect"):
-            try:
-                anki("version", None, config)
-            except RuntimeError as exc:
-                raise RuntimeError(
-                    "Anki chưa được mở hoặc AnkiConnect chưa hoạt động. "
-                    "Hãy mở Anki, cài add-on 2055492159 nếu cần, rồi chạy lại run.exe."
-                ) from exc
-        all_cards: list[dict] = []
-        word_batches = chunks(words, int(config["chunk_size"]))
-        for index, batch in enumerate(word_batches, start=1):
-            with timed_step(f"Dùng AI tạo thẻ từ vựng, đợt {index}/{len(word_batches)} ({len(batch)} từ)"):
-                all_cards.extend(gemini_cards(batch, prompt, config))
-        all_reverse_cards: list[dict] = []
-        reverse_batches = chunks(all_cards, int(config["chunk_size"]))
-        for index, batch in enumerate(reverse_batches, start=1):
-            with timed_step(f"Dùng AI tạo thẻ luyện tập, đợt {index}/{len(reverse_batches)} ({len(batch)} từ)"):
-                all_reverse_cards.extend(gemini_reverse_cards(batch, reverse_prompt, config))
-        with timed_step("Lấy audio phát âm từ DictionaryAPI"):
-            enrich_audio(all_cards, all_reverse_cards)
-        with timed_step("Tạo file Excel"):
-            excel_path = write_excel(root, all_cards, all_reverse_cards)
-        msg("OK", f"File Excel: {excel_path.relative_to(root)}")
-        with timed_step("Thêm thẻ và audio vào Anki"):
-            added = add_to_anki(all_cards, all_reverse_cards, config)
-        msg("OK", f"Đã thêm {added} thẻ vào Anki.")
+            check_anki(config)
+        generate_and_add(root, config, words, prompt, reverse_prompt)
         return 0
     except (RuntimeError, HTTPError) as exc:
         msg("Lỗi", str(exc))
