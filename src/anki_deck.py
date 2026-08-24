@@ -116,7 +116,7 @@ def timed_step(text: str):
         msg("Lỗi", f"{text} thất bại sau {time.perf_counter() - started:.1f} giây.")
         raise
     else:
-        msg("OK", f"{text} hoàn tất trong {time.perf_counter() - started:.1f} giây.")
+        msg("OK", f"Hoàn thành trong {time.perf_counter() - started:.1f} giây.")
     finally:
         _active_step = previous
 
@@ -669,6 +669,11 @@ def generate_and_add(
 
 
 def run_self_test() -> None:
+    with redirect_stdout(StringIO()) as progress:
+        with timed_step("Kết nối Anki"):
+            pass
+    assert re.fullmatch(r"\[OK       \] Hoàn thành trong \d+\.\d+ giây\.", progress.getvalue().splitlines()[-1])
+
     sample = {
         "cards": [
             {
@@ -829,7 +834,7 @@ def run_self_test() -> None:
                 raise ValueError("test")
         except ValueError:
             pass
-    assert re.search(r"hoàn tất trong \d+\.\d giây", output.getvalue())
+    assert re.search(r"Hoàn thành trong \d+\.\d giây", output.getvalue())
     assert re.search(r"thất bại sau \d+\.\d giây", output.getvalue())
     assert "[Đang chạy]" in output.getvalue()
     assert re.search(r"Kiểm tra thời gian \(\d+\.\d+s\)", output.getvalue())
