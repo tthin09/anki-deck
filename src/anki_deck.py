@@ -83,6 +83,9 @@ REVERSE_SCHEMA = {
 
 
 AUDIO_BUTTON_STYLE = "<style>.replay-button{display:block!important;text-align:center;margin-top:12px}</style>"
+AUDIO_DOWNLOAD_RETRIES = 3
+AUDIO_DOWNLOAD_MAX_BYTES = 10 * 1024 * 1024
+AUDIO_DOWNLOAD_RETRY_CODES = {429, 500, 502, 503, 504}
 
 
 def app_dir() -> Path:
@@ -238,6 +241,44 @@ def audio_metadata(url: str) -> dict | None:
     }
 
 
+def download_audio(
+    audio: dict,
+    directory: Path,
+    sleep=time.sleep,
+    opener=None,
+) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / audio["filename"]
+    request = Request(audio["url"], headers={"User-Agent": "anki-deck/1.0 (audio download)"})
+    for attempt in range(AUDIO_DOWNLOAD_RETRIES):
+        try:
+            with (opener or urlopen)(request, timeout=30) as response:
+                content_type = response.headers.get_content_type()
+                if content_type.startswith("text/"):
+                    raise RuntimeError(f"audio trả về {content_type} thay vì file âm thanh")
+                data = response.read(AUDIO_DOWNLOAD_MAX_BYTES + 1)
+                if not data:
+                    raise RuntimeError("audio trả về file rỗng")
+                if len(data) > AUDIO_DOWNLOAD_MAX_BYTES:
+                    raise RuntimeError("audio vượt quá giới hạn 10 MB")
+                path.write_bytes(data)
+                return path
+        except HTTPError as exc:
+            if exc.code not in AUDIO_DOWNLOAD_RETRY_CODES or attempt == AUDIO_DOWNLOAD_RETRIES - 1:
+                raise RuntimeError(f"tải audio thất bại ({exc.code})") from exc
+            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+            try:
+                delay = min(30.0, max(1.0, float(retry_after)))
+            except (TypeError, ValueError):
+                delay = float(2**attempt)
+            sleep(delay)
+        except (URLError, TimeoutError, ConnectionError, socket.timeout) as exc:
+            if attempt == AUDIO_DOWNLOAD_RETRIES - 1:
+                raise RuntimeError(f"tải audio thất bại: {exc}") from exc
+            sleep(float(2**attempt))
+    raise RuntimeError("tải audio thất bại")
+
+
 def dictionary_audio(text: str) -> dict | None:
     url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{quote(text, safe='')}"
     return select_audio(get_json(url))
@@ -275,6 +316,7 @@ def resolve_audio(
     sources=None,
     trace: list[str] | None = None,
     announce: bool = False,
+    prepare=None,
 ) -> dict | None:
     for source in sources or (dictionary_audio, wiktionary_audio, google_tts_audio):
         name = {
@@ -294,6 +336,15 @@ def resolve_audio(
             if announce:
                 msg("Cảnh báo", f"Audio '{text}': {name} lỗi sau {time.perf_counter() - started:.1f}s.")
             continue
+        if audio and prepare:
+            try:
+                audio = prepare(audio)
+            except RuntimeError as exc:
+                if trace is not None:
+                    trace.append(f"{source.__name__}: download error ({exc})")
+                if announce:
+                    msg("Cảnh báo", f"Audio '{text}': {name} tải thất bại, thử nguồn tiếp theo.")
+                continue
         if audio:
             if trace is not None:
                 trace.append(f"{source.__name__}: audio found")
@@ -766,6 +817,18 @@ def run_self_test() -> None:
     assert resolve_audio("word", (missing_source, missing_source, unused_source), trace)["filename"] == "tts.mp3"
     assert calls == ["missing", "missing", "tts"]
     assert trace == ["missing_source: no audio", "missing_source: no audio", "unused_source: audio found"]
+    trace = []
+
+    def rate_limited_source(text):
+        return {"url": "https://example.com/rate-limited.mp3", "filename": "rate-limited.mp3"}
+
+    def prepare_audio(audio):
+        if audio["filename"] == "rate-limited.mp3":
+            raise RuntimeError("tải audio thất bại (429)")
+        return audio
+
+    assert resolve_audio("word", (rate_limited_source, backup_source), trace, prepare=prepare_audio)["filename"] == "backup.mp3"
+    assert trace == ["rate_limited_source: download error (tải audio thất bại (429))", "backup_source: audio found"]
     progress = StringIO()
     with redirect_stdout(progress):
         assert resolve_audio("progress", (unused_source,), announce=True)["filename"] == "tts.mp3"
