@@ -83,6 +83,9 @@ REVERSE_SCHEMA = {
 
 
 AUDIO_BUTTON_STYLE = "<style>.replay-button{display:block!important;text-align:center;margin-top:12px}</style>"
+AUDIO_DOWNLOAD_RETRIES = 3
+AUDIO_DOWNLOAD_MAX_BYTES = 10 * 1024 * 1024
+AUDIO_DOWNLOAD_RETRY_CODES = {429, 500, 502, 503, 504}
 
 
 def app_dir() -> Path:
@@ -116,7 +119,7 @@ def timed_step(text: str):
         msg("Lỗi", f"{text} thất bại sau {time.perf_counter() - started:.1f} giây.")
         raise
     else:
-        msg("OK", f"{text} hoàn tất trong {time.perf_counter() - started:.1f} giây.")
+        msg("OK", f"Hoàn thành trong {time.perf_counter() - started:.1f} giây.")
     finally:
         _active_step = previous
 
@@ -238,6 +241,44 @@ def audio_metadata(url: str) -> dict | None:
     }
 
 
+def download_audio(
+    audio: dict,
+    directory: Path,
+    sleep=time.sleep,
+    opener=None,
+) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / audio["filename"]
+    request = Request(audio["url"], headers={"User-Agent": "anki-deck/1.0 (audio download)"})
+    for attempt in range(AUDIO_DOWNLOAD_RETRIES):
+        try:
+            with (opener or urlopen)(request, timeout=30) as response:
+                content_type = response.headers.get_content_type()
+                if content_type.startswith("text/"):
+                    raise RuntimeError(f"audio trả về {content_type} thay vì file âm thanh")
+                data = response.read(AUDIO_DOWNLOAD_MAX_BYTES + 1)
+                if not data:
+                    raise RuntimeError("audio trả về file rỗng")
+                if len(data) > AUDIO_DOWNLOAD_MAX_BYTES:
+                    raise RuntimeError("audio vượt quá giới hạn 10 MB")
+                path.write_bytes(data)
+                return path
+        except HTTPError as exc:
+            if exc.code not in AUDIO_DOWNLOAD_RETRY_CODES or attempt == AUDIO_DOWNLOAD_RETRIES - 1:
+                raise RuntimeError(f"tải audio thất bại ({exc.code})") from exc
+            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+            try:
+                delay = min(30.0, max(1.0, float(retry_after)))
+            except (TypeError, ValueError):
+                delay = float(2**attempt)
+            sleep(delay)
+        except (URLError, TimeoutError, ConnectionError, socket.timeout) as exc:
+            if attempt == AUDIO_DOWNLOAD_RETRIES - 1:
+                raise RuntimeError(f"tải audio thất bại: {exc}") from exc
+            sleep(float(2**attempt))
+    raise RuntimeError("tải audio thất bại")
+
+
 def dictionary_audio(text: str) -> dict | None:
     url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{quote(text, safe='')}"
     return select_audio(get_json(url))
@@ -275,6 +316,7 @@ def resolve_audio(
     sources=None,
     trace: list[str] | None = None,
     announce: bool = False,
+    prepare=None,
 ) -> dict | None:
     for source in sources or (dictionary_audio, wiktionary_audio, google_tts_audio):
         name = {
@@ -294,6 +336,15 @@ def resolve_audio(
             if announce:
                 msg("Cảnh báo", f"Audio '{text}': {name} lỗi sau {time.perf_counter() - started:.1f}s.")
             continue
+        if audio and prepare:
+            try:
+                audio = prepare(audio)
+            except RuntimeError as exc:
+                if trace is not None:
+                    trace.append(f"{source.__name__}: download error ({exc})")
+                if announce:
+                    msg("Cảnh báo", f"Audio '{text}': {name} tải thất bại, thử nguồn tiếp theo.")
+                continue
         if audio:
             if trace is not None:
                 trace.append(f"{source.__name__}: audio found")
@@ -307,7 +358,7 @@ def resolve_audio(
     return None
 
 
-def enrich_audio(cards: list[dict], reverse_cards: list[dict]) -> None:
+def enrich_audio(cards: list[dict], reverse_cards: list[dict], audio_dir: Path | None = None) -> None:
     cache: dict[str, dict | None] = {}
     trace_cache: dict[str, list[str]] = {}
     next_dictionary_request = 0.0
@@ -320,6 +371,12 @@ def enrich_audio(cards: list[dict], reverse_cards: list[dict]) -> None:
             time.sleep(delay)
         next_dictionary_request = time.monotonic() + 2.5
         return dictionary_audio(text)
+
+    def prepare(audio: dict) -> dict:
+        if audio_dir is None:
+            return audio
+        path = download_audio(audio, audio_dir)
+        return {**audio, "path": str(path)}
 
     lookup_count = 0
     total_lookups = len(cards) + len(reverse_cards)
@@ -336,6 +393,7 @@ def enrich_audio(cards: list[dict], reverse_cards: list[dict]) -> None:
                 (paced_dictionary_audio, wiktionary_audio, google_tts_audio),
                 trace_cache[key],
                 announce=True,
+                prepare=prepare,
             )
         else:
             msg("Đang chạy", f"Audio '{text}': dùng kết quả đã lưu.")
@@ -580,12 +638,7 @@ def anki_note(deck: str, front: str, back: str, tags: list[str], audio: dict | N
         "tags": tags,
     }
     if audio:
-        note["fields"][audio_field] += AUDIO_BUTTON_STYLE
-        note["audio"] = {
-            "url": audio["url"],
-            "filename": audio["filename"],
-            "fields": [audio_field],
-        }
+        note["fields"][audio_field] += f"[sound:{audio['filename']}]" + AUDIO_BUTTON_STYLE
     return note
 
 
@@ -605,11 +658,35 @@ def enable_anki_autoplay(deck: str, config: dict) -> None:
         ) from exc
 
 
+def store_audio_files(cards: list[dict], reverse_cards: list[dict], config: dict) -> None:
+    stored: set[str] = set()
+    for item in [*cards, *reverse_cards]:
+        audio = item.get("audio")
+        if not audio or audio["filename"] in stored:
+            continue
+        path = Path(audio.get("path", ""))
+        if not path.is_file():
+            raise RuntimeError(f"Không tìm thấy file audio tạm: {path.name or audio['filename']}")
+        result = anki(
+            "storeMediaFile",
+            {
+                "filename": audio["filename"],
+                "path": str(path),
+                "deleteExisting": True,
+            },
+            config,
+        )
+        if not result:
+            raise RuntimeError(f"Anki không lưu được audio: {audio['filename']}")
+        stored.add(audio["filename"])
+
+
 def add_to_anki(cards: list[dict], reverse_cards: list[dict], config: dict) -> int:
     anki("version", None, config)
     deck = config["deck_name"]
     anki("createDeck", {"deck": deck}, config)
     enable_anki_autoplay(deck, config)
+    store_audio_files(cards, reverse_cards, config)
     normal_notes = [
         anki_note(deck, card["anki_front_html"], card["anki_back_html"], ["ai-vocab"], card.get("audio"), "Front")
         for card in shuffled(cards)
@@ -656,19 +733,26 @@ def generate_and_add(
     for index, batch in enumerate(reverse_batches, start=1):
         with timed_step(f"Dùng AI tạo thẻ luyện tập, đợt {index}/{len(reverse_batches)} ({len(batch)} từ)"):
             all_reverse_cards.extend(gemini_reverse_cards(batch, reverse_prompt, config))
-    with timed_step("Lấy audio phát âm từ DictionaryAPI"):
-        enrich_audio(all_cards, all_reverse_cards)
-    with timed_step("Tạo file Excel"):
-        excel_path = write_excel(root, all_cards, all_reverse_cards)
-    msg("OK", f"File Excel: {excel_path.relative_to(root)}")
-    add_config = {**config, "deck_name": deck_name} if deck_name else config
-    with timed_step("Thêm thẻ và audio vào Anki"):
-        added = add_to_anki(all_cards, all_reverse_cards, add_config)
+    with tempfile.TemporaryDirectory(prefix="anki-deck-audio-") as temp_dir:
+        audio_dir = Path(temp_dir)
+        with timed_step("Lấy audio phát âm từ DictionaryAPI"):
+            enrich_audio(all_cards, all_reverse_cards, audio_dir)
+        with timed_step("Tạo file Excel"):
+            excel_path = write_excel(root, all_cards, all_reverse_cards)
+        msg("OK", f"File Excel: {excel_path.relative_to(root)}")
+        add_config = {**config, "deck_name": deck_name} if deck_name else config
+        with timed_step("Thêm thẻ và audio vào Anki"):
+            added = add_to_anki(all_cards, all_reverse_cards, add_config)
     msg("OK", f"Đã thêm {added} thẻ vào Anki.")
     return added
 
 
 def run_self_test() -> None:
+    with redirect_stdout(StringIO()) as progress:
+        with timed_step("Kết nối Anki"):
+            pass
+    assert re.fullmatch(r"\[OK       \] Hoàn thành trong \d+\.\d+ giây\.", progress.getvalue().splitlines()[-1])
+
     sample = {
         "cards": [
             {
@@ -761,6 +845,18 @@ def run_self_test() -> None:
     assert resolve_audio("word", (missing_source, missing_source, unused_source), trace)["filename"] == "tts.mp3"
     assert calls == ["missing", "missing", "tts"]
     assert trace == ["missing_source: no audio", "missing_source: no audio", "unused_source: audio found"]
+    trace = []
+
+    def rate_limited_source(text):
+        return {"url": "https://example.com/rate-limited.mp3", "filename": "rate-limited.mp3"}
+
+    def prepare_audio(audio):
+        if audio["filename"] == "rate-limited.mp3":
+            raise RuntimeError("tải audio thất bại (429)")
+        return audio
+
+    assert resolve_audio("word", (rate_limited_source, backup_source), trace, prepare=prepare_audio)["filename"] == "backup.mp3"
+    assert trace == ["rate_limited_source: download error (tải audio thất bại (429))", "backup_source: audio found"]
     progress = StringIO()
     with redirect_stdout(progress):
         assert resolve_audio("progress", (unused_source,), announce=True)["filename"] == "tts.mp3"
@@ -769,8 +865,8 @@ def run_self_test() -> None:
     assert google_tts_audio("two words")["url"].endswith("q=two%20words")
     normal_note = anki_note("Deck", "front", "back", ["ai-vocab"], audio, "Front")
     reverse_note = anki_note("Deck", "front", "back", ["reverse"], audio, "Back")
-    assert normal_note["audio"]["fields"] == ["Front"]
-    assert reverse_note["audio"]["fields"] == ["Back"]
+    assert f"[sound:{audio['filename']}]" in normal_note["fields"]["Front"]
+    assert f"[sound:{audio['filename']}]" in reverse_note["fields"]["Back"]
     assert normal_note["fields"]["Front"].endswith(AUDIO_BUTTON_STYLE)
     assert reverse_note["fields"]["Back"].endswith(AUDIO_BUTTON_STYLE)
     assert AUDIO_BUTTON_STYLE not in normal_note["fields"]["Back"]
@@ -829,7 +925,7 @@ def run_self_test() -> None:
                 raise ValueError("test")
         except ValueError:
             pass
-    assert re.search(r"hoàn tất trong \d+\.\d giây", output.getvalue())
+    assert re.search(r"Hoàn thành trong \d+\.\d giây", output.getvalue())
     assert re.search(r"thất bại sau \d+\.\d giây", output.getvalue())
     assert "[Đang chạy]" in output.getvalue()
     assert re.search(r"Kiểm tra thời gian \(\d+\.\d+s\)", output.getvalue())
