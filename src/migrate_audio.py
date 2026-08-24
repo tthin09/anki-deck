@@ -84,6 +84,19 @@ def report(root: Path, rows: list[dict]) -> Path:
     return path
 
 
+def migration_counts(notes: list[dict]) -> tuple[int, int]:
+    total = missing_audio = 0
+    for note in notes:
+        cards = len(note.get("cards", []))
+        total += cards
+        reverse = "reverse" in {tag.casefold() for tag in note.get("tags", [])}
+        target = "Back" if reverse else "Front"
+        value = note.get("fields", {}).get(target, {}).get("value", "")
+        if "[sound:" not in value.casefold():
+            missing_audio += cards
+    return total, missing_audio
+
+
 def run_self_test() -> None:
     assert term_from_field("advocate (v/n)<br>/ipa/", True) == "advocate"
     assert term_from_field("advocates (v)<style>x</style>", False) == "advocates"
@@ -95,6 +108,10 @@ def run_self_test() -> None:
     assert value == f"answer{AUDIO_BUTTON_STYLE}[sound:audio.mp3]"
     assert migrated_field(value, "other.mp3").count(AUDIO_BUTTON_STYLE) == 1
     assert preview_line({"term": "advocates", "audio_term": "advocate", "reverse": True}) == "  - advocates (thẻ đảo) → audio: advocate"
+    assert migration_counts([
+        {"cards": [1], "fields": {"Front": {"value": "word"}}, "tags": []},
+        {"cards": [2, 3], "fields": {"Back": {"value": "[sound:word.mp3]"}}, "tags": ["reverse"]},
+    ]) == (3, 1)
     msg("OK", "Tự kiểm tra migrate thành công.")
 
 
@@ -142,6 +159,8 @@ def migrate(root: Path, dry_run: bool, assume_yes: bool) -> int:
         anki("version", None, cfg)
         ids = anki("findNotes", {"query": "tag:ai-vocab"}, cfg)
         notes = anki("notesInfo", {"notes": ids}, cfg) if ids else []
+    total_cards, missing_audio = migration_counts(notes)
+    msg("Thông tin", f"Hiện tại Deck đang có {total_cards} thẻ, có {missing_audio} thẻ không có audio")
 
     normal_terms: set[str] = set()
     candidates = []
