@@ -11,7 +11,6 @@ from pathlib import Path
 from anki_deck import (
     AUDIO_BUTTON_STYLE,
     anki,
-    dictionary_audio,
     download_audio,
     enable_anki_autoplay,
     google_tts_audio,
@@ -129,7 +128,7 @@ def resolve_legacy_audio(candidates: list[dict], normal_terms: set[str]):
         if key not in cache:
             cache[key] = resolve_audio(
                 term,
-                (dictionary_audio, wiktionary_audio, google_tts_audio),
+                (wiktionary_audio, google_tts_audio),
                 prepare=prepare,
             )
         return cache[key]

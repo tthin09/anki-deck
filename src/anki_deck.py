@@ -199,35 +199,6 @@ def post_json(url: str, payload: dict, headers: dict | None = None, timeout: int
         raise RuntimeError(f"Không thể kết nối tới dịch vụ: {exc}") from exc
 
 
-def get_json(url: str, timeout: int = 8):
-    try:
-        with urlopen(Request(url, headers={"User-Agent": "anki-deck/1.0"}), timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        raise RuntimeError(f"DictionaryAPI trả về lỗi {exc.code}.") from exc
-    except (URLError, TimeoutError, ConnectionError, socket.timeout, UnicodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Không đọc được DictionaryAPI: {exc}") from exc
-
-
-def select_audio(entries) -> dict | None:
-    candidates = []
-    for entry in entries if isinstance(entries, list) else []:
-        for phonetic in entry.get("phonetics", []) if isinstance(entry, dict) else []:
-            if not isinstance(phonetic, dict):
-                continue
-            url = str(phonetic.get("audio") or "").strip()
-            audio = audio_metadata(url)
-            if not audio:
-                continue
-            marker = urlparse(audio["url"]).path.casefold()
-            rank = 0 if re.search(r"(?:^|[-_/.])us(?:[-_/.]|$)", marker) else 1 if re.search(r"(?:^|[-_/.])(uk|gb)(?:[-_/.]|$)", marker) else 2
-            candidates.append((rank, audio["url"]))
-    if not candidates:
-        return None
-    _, url = min(candidates, key=lambda item: item[0])
-    return audio_metadata(url)
-
-
 def audio_metadata(url: str) -> dict | None:
     url = html.unescape(url.strip())
     if url.startswith("//"):
@@ -286,11 +257,6 @@ def is_mp3(data: bytes) -> bool:
     return data.startswith(b"ID3") or (len(data) >= 2 and data[0] == 0xFF and data[1] & 0xE0 == 0xE0)
 
 
-def dictionary_audio(text: str) -> dict | None:
-    url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{quote(text, safe='')}"
-    return select_audio(get_json(url))
-
-
 def wiktionary_audio_from_html(page: str) -> dict | None:
     english = re.search(r'<h2 id="English">.*?(?=<h2|\Z)', page, flags=re.DOTALL)
     if not english:
@@ -325,10 +291,8 @@ def resolve_audio(
     announce: bool = False,
     prepare=None,
 ) -> dict | None:
-    for source in sources or (dictionary_audio, wiktionary_audio, google_tts_audio):
+    for source in sources or (wiktionary_audio, google_tts_audio):
         name = {
-            "paced_dictionary_audio": "DictionaryAPI",
-            "dictionary_audio": "DictionaryAPI",
             "wiktionary_audio": "Wiktionary",
             "google_tts_audio": "Google TTS",
         }.get(source.__name__, source.__name__)
@@ -368,16 +332,6 @@ def resolve_audio(
 def enrich_audio(cards: list[dict], reverse_cards: list[dict], audio_dir: Path | None = None) -> None:
     cache: dict[str, dict | None] = {}
     trace_cache: dict[str, list[str]] = {}
-    next_dictionary_request = 0.0
-
-    def paced_dictionary_audio(text: str) -> dict | None:
-        nonlocal next_dictionary_request
-        delay = next_dictionary_request - time.monotonic()
-        if delay > 0:
-            msg("Đang chạy", f"Audio '{text}': chờ DictionaryAPI {delay:.1f}s để giữ giới hạn request...")
-            time.sleep(delay)
-        next_dictionary_request = time.monotonic() + 2.5
-        return dictionary_audio(text)
 
     def prepare(audio: dict) -> dict:
         if audio_dir is None:
@@ -397,7 +351,7 @@ def enrich_audio(cards: list[dict], reverse_cards: list[dict], audio_dir: Path |
             trace_cache[key] = []
             cache[key] = resolve_audio(
                 text,
-                (paced_dictionary_audio, wiktionary_audio, google_tts_audio),
+                (wiktionary_audio, google_tts_audio),
                 trace_cache[key],
                 announce=True,
                 prepare=prepare,
@@ -567,7 +521,7 @@ def next_excel_path(vocabulary_dir: Path) -> Path:
     prefix = datetime.now().strftime("%d%m%y")
     ids = []
     for path in vocabulary_dir.glob(f"{prefix}-*.*"):
-        match = re.fullmatch(rf"{prefix}-(\d{{2}})\.(?:xlsx|apkg)", path.name)
+        match = re.fullmatch(rf"{prefix}-(\d{{2}})(?:-\d+words)?\.(?:xlsx|apkg)", path.name)
         if match:
             ids.append(int(match.group(1)))
     next_id = max(ids, default=0) + 1
@@ -752,13 +706,13 @@ def generate_and_add(
             all_reverse_cards.extend(gemini_reverse_cards(batch, reverse_prompt, config))
     with tempfile.TemporaryDirectory(prefix="anki-deck-audio-") as temp_dir:
         audio_dir = Path(temp_dir)
-        with timed_step("Lấy audio phát âm từ DictionaryAPI"):
+        with timed_step("Lấy audio phát âm từ Wiktionary và Google TTS"):
             enrich_audio(all_cards, all_reverse_cards, audio_dir)
         with timed_step("Tạo file Excel"):
             excel_path = write_excel(root, all_cards, all_reverse_cards)
         msg("OK", f"File Excel: {excel_path.relative_to(root)}")
         target_deck = deck_name or config["deck_name"]
-        apkg_path = excel_path.with_suffix(".apkg")
+        apkg_path = excel_path.with_name(f"{excel_path.stem}-{len(all_cards)}words.apkg")
         with timed_step("Đóng gói thẻ và audio thành APKG"):
             create_apkg(all_cards, all_reverse_cards, target_deck, apkg_path)
         msg("OK", f"File APKG: {apkg_path.relative_to(root)}")
@@ -831,24 +785,14 @@ def run_self_test() -> None:
     assert reverse[0]["keyword"] == "combination (n)"
     assert reverse[0]["answer"] == "combination"
     assert "___" in reverse[0]["front"]
-    audio = select_audio([
-        {"phonetics": [
-            {"audio": "", "text": "/x/"},
-            {"audio": "//api.dictionaryapi.dev/media/word-uk.mp3"},
-            {
-                "audio": "https://api.dictionaryapi.dev/media/word-us.mp3",
-                "sourceUrl": "https://commons.wikimedia.org/example",
-                "license": {"name": "CC BY", "url": "https://creativecommons.org/licenses/by/4.0/"},
-            },
-        ]}
-    ])
-    assert audio and audio["url"].endswith("-us.mp3")
+    audio = audio_metadata("https://example.com/audio.mp3")
+    assert audio and audio["url"].endswith("audio.mp3")
     assert audio["filename"].startswith("vocab_") and audio["filename"].endswith(".mp3")
     assert set(audio) == {"url", "filename"}
     assert audio_metadata("https://example.com/audio") ["filename"].endswith(".mp3")
     assert audio_metadata("https://example.com/audio.ogg") is None
     assert audio_metadata("https://example.com/audio.wav") is None
-    assert select_audio([{"phonetics": [{"audio": "http://example.com/unsafe.mp3"}]}]) is None
+    assert audio_metadata("http://example.com/unsafe.mp3") is None
     wiktionary = wiktionary_audio_from_html(
         '<h2 id="French">French</h2><source src="//example.com/french.mp3" type="audio/mpeg">'
         '<h2 id="English">English</h2><source src="//upload.wikimedia.org/english.mp3" type="audio/mpeg">'
@@ -1049,12 +993,20 @@ def run_diagnostics(root: Path) -> int:
     check("Mẫu Excel", valid_template)
     check("Đọc cấu hình", lambda: f"model={load_config(root)['model']} (khóa API đã được ẩn)")
     check("Đọc file input", lambda: f"{len(read_words(root / 'input'))} từ/cụm từ")
-    check(
-        "DictionaryAPI",
-        lambda: "kết nối và audio hoạt động"
-        if dictionary_audio("hello")
-        else (_ for _ in ()).throw(RuntimeError("không tìm thấy audio thử")),
-    )
+    def check_audio_sources() -> str:
+        with tempfile.TemporaryDirectory() as audio_temp:
+            trace: list[str] = []
+            audio = resolve_audio(
+                "hello",
+                (wiktionary_audio, google_tts_audio),
+                trace,
+                prepare=lambda item: {**item, "path": str(download_audio(item, Path(audio_temp)))},
+            )
+            if not audio:
+                raise RuntimeError("; ".join(trace))
+            return f"đã tải audio ({trace[-1]})"
+
+    check("Audio Wiktionary / Google TTS", check_audio_sources)
 
     def writable() -> str:
         folder = root / "vocabulary"
