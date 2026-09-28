@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import html
 import hashlib
 import json
@@ -86,6 +87,7 @@ AUDIO_BUTTON_STYLE = "<style>.replay-button{display:block!important;text-align:c
 AUDIO_DOWNLOAD_RETRIES = 3
 AUDIO_DOWNLOAD_MAX_BYTES = 10 * 1024 * 1024
 AUDIO_DOWNLOAD_RETRY_CODES = {429, 500, 502, 503, 504}
+PARTS_OF_SPEECH = {"n", "v", "adj", "adv", "np", "vp", "adjp", "advp", "s"}
 
 
 def app_dir() -> Path:
@@ -253,14 +255,13 @@ def download_audio(
     for attempt in range(AUDIO_DOWNLOAD_RETRIES):
         try:
             with (opener or urlopen)(request, timeout=30) as response:
-                content_type = response.headers.get_content_type()
-                if content_type.startswith("text/"):
-                    raise RuntimeError(f"audio trả về {content_type} thay vì file âm thanh")
                 data = response.read(AUDIO_DOWNLOAD_MAX_BYTES + 1)
                 if not data:
                     raise RuntimeError("audio trả về file rỗng")
                 if len(data) > AUDIO_DOWNLOAD_MAX_BYTES:
                     raise RuntimeError("audio vượt quá giới hạn 10 MB")
+                if not is_mp3(data):
+                    raise RuntimeError("Nguồn audio trả về dữ liệu không phải file MP3.")
                 path.write_bytes(data)
                 return path
         except HTTPError as exc:
@@ -277,6 +278,10 @@ def download_audio(
                 raise RuntimeError(f"tải audio thất bại: {exc}") from exc
             sleep(float(2**attempt))
     raise RuntimeError("tải audio thất bại")
+
+
+def is_mp3(data: bytes) -> bool:
+    return data.startswith(b"ID3") or (len(data) >= 2 and data[0] == 0xFF and data[1] & 0xE0 == 0xE0)
 
 
 def dictionary_audio(text: str) -> dict | None:
@@ -499,6 +504,10 @@ def validate_cards(data: dict) -> list[dict]:
             raise RuntimeError("AI trả về thẻ thiếu dữ liệu. Chưa thêm thẻ vào Anki.")
         if not isinstance(card["synonyms"], list):
             raise RuntimeError("AI trả về synonyms không hợp lệ. Chưa thêm thẻ vào Anki.")
+    for card in cards:
+        parts = str(card["part_of_speech"]).split("/")
+        if any(part not in PARTS_OF_SPEECH for part in parts) or len(set(parts)) != len(parts):
+            raise RuntimeError(f"AI trả về part_of_speech không hợp lệ cho '{card['word']}'. Chưa thêm thẻ vào Anki.")
     return cards
 
 
@@ -671,12 +680,12 @@ def store_audio_files(cards: list[dict], reverse_cards: list[dict], config: dict
             "storeMediaFile",
             {
                 "filename": audio["filename"],
-                "path": str(path),
+                "data": base64.b64encode(path.read_bytes()).decode("ascii"),
                 "deleteExisting": True,
             },
             config,
         )
-        if not result:
+        if result != audio["filename"]:
             raise RuntimeError(f"Anki không lưu được audio: {audio['filename']}")
         stored.add(audio["filename"])
 
@@ -702,7 +711,12 @@ def add_to_anki(cards: list[dict], reverse_cards: list[dict], config: dict) -> i
     if not notes:
         raise RuntimeError("Không có thẻ mới để thêm vào Anki. Có thể các thẻ này đã tồn tại.")
     result = anki("addNotes", {"notes": notes}, config)
-    return len([note_id for note_id in result if note_id])
+    if not isinstance(result, list) or len(result) != len(notes):
+        raise RuntimeError("Anki trả về kết quả thêm thẻ không hợp lệ.")
+    added = sum(note_id is not None for note_id in result)
+    if added != len(notes):
+        raise RuntimeError(f"Anki chỉ thêm được {added}/{len(notes)} thẻ. Hãy kiểm tra các thẻ bị từ chối trong Anki.")
+    return added
 
 
 def check_anki(config: dict) -> None:
@@ -770,6 +784,15 @@ def run_self_test() -> None:
     }
     cards = validate_cards(sample)
     assert cards[0]["word"] == "combination"
+    invalid_pos = copy(sample)
+    invalid_pos["cards"] = [dict(cards[0], part_of_speech="noun")]
+    try:
+        validate_cards(invalid_pos)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("Unsupported part-of-speech labels must be rejected.")
+    assert is_mp3(b"ID3sample") and is_mp3(b"\xff\xfb\x90") and not is_mp3(b"error 404")
     assert sorted(shuffled(["a", "b", "c"])) == ["a", "b", "c"]
     assert is_busy_ai_error(RuntimeError("Gọi API thất bại (503): overloaded"))
     assert is_busy_ai_error(RuntimeError("Không thể kết nối tới dịch vụ: timed out"))
@@ -874,6 +897,18 @@ def run_self_test() -> None:
     assert "audio" not in anki_note("Deck", "front", "back", [], None, "Front")
     original_anki = globals()["anki"]
     actions = []
+
+    with tempfile.TemporaryDirectory() as audio_temp:
+        audio_path = Path(audio_temp) / "sample.mp3"
+        audio_path.write_bytes(b"ID3sample")
+        globals()["anki"] = lambda action, params, config: actions.append((action, params)) or params["filename"]
+        try:
+            store_audio_files([{"audio": {"filename": "sample.mp3", "path": str(audio_path)}}], [], {})
+        finally:
+            globals()["anki"] = original_anki
+    stored_payload = actions[-1][1]
+    assert stored_payload["data"] == base64.b64encode(b"ID3sample").decode("ascii")
+    assert "path" not in stored_payload
 
     def fake_anki(action, params, config):
         actions.append((action, params))
