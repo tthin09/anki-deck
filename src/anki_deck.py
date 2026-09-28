@@ -11,6 +11,7 @@ import sqlite3
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 import zipfile
 from contextlib import contextmanager, redirect_stdout
 from copy import copy
@@ -339,39 +340,40 @@ def enrich_audio(cards: list[dict], reverse_cards: list[dict], audio_dir: Path |
         path = download_audio(audio, audio_dir)
         return {**audio, "path": str(path)}
 
-    lookup_count = 0
-    total_lookups = len(cards) + len(reverse_cards)
+    terms = {item.casefold(): item for item in
+             [card["word"] for card in cards] + [card["answer"] for card in reverse_cards]}
+    unique_terms = list(terms.items())
 
-    def lookup(text: str) -> dict | None:
-        nonlocal lookup_count
-        lookup_count += 1
-        key = text.casefold()
-        msg("Đang chạy", f"Audio {lookup_count}/{total_lookups}: '{text}'...")
-        if key not in cache:
-            trace_cache[key] = []
-            cache[key] = resolve_audio(
-                text,
-                (wiktionary_audio, google_tts_audio),
-                trace_cache[key],
-                announce=True,
-                prepare=prepare,
-            )
-        else:
-            msg("Đang chạy", f"Audio '{text}': dùng kết quả đã lưu.")
-        return cache[key]
+    def fetch(item: tuple[str, str]) -> tuple[str, dict | None]:
+        key, text = item
+        trace_cache[key] = []
+        msg("Đang chạy", f"Audio '{text}'...")
+        audio = resolve_audio(
+            text,
+            (wiktionary_audio, google_tts_audio),
+            trace_cache[key],
+            announce=True,
+            prepare=prepare,
+        )
+        return key, audio
 
-    by_word = {}
+    # ponytail: cap audio requests at 8 concurrent words to limit service load.
+    for start in range(0, len(unique_terms), 8):
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            cache.update(executor.map(fetch, unique_terms[start:start + 8]))
+
+    by_word = {card["word"].casefold(): cache.get(card["word"].casefold()) for card in cards}
     for card in cards:
-        card["audio"] = lookup(card["word"])
+        key = card["word"].casefold()
+        card["audio"] = by_word[key]
         if card["audio"] is None:
             msg(
                 "Cảnh báo",
-                f"Không tìm thấy audio cho '{card['word']}' sau: {'; '.join(trace_cache[card['word'].casefold()])}. "
+                f"Không tìm thấy audio cho '{card['word']}' sau: {'; '.join(trace_cache[key])}. "
                 "Thẻ vẫn được tạo không có âm thanh.",
             )
-        by_word[card["word"].casefold()] = card["audio"]
     for reverse in reverse_cards:
-        reverse["audio"] = lookup(reverse["answer"]) or by_word.get(reverse["word"].casefold())
+        reverse["audio"] = cache.get(reverse["answer"].casefold()) or by_word.get(reverse["word"].casefold())
         if reverse["audio"] is None:
             msg(
                 "Cảnh báo",
