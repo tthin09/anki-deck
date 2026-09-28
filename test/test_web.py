@@ -107,6 +107,21 @@ class WebFlow(unittest.TestCase):
         with (self.data / "history" / "conversions.csv").open(encoding="utf-8", newline="") as file:
             self.assertEqual(len(list(csv.DictReader(file))), 2)
 
+    def test_audio_rate_limits_retry_with_smaller_batches(self):
+        original = generator.wiktionary_audio
+        attempts = {}
+        def flaky_audio(word):
+            attempts[word] = attempts.get(word, 0) + 1
+            if attempts[word] == 1:
+                raise RuntimeError("Wiktionary trả về lỗi 429.")
+            return {"url": "https://example.com/audio.mp3", "filename": f"{word}.mp3"}
+        cards = [{"word": f"word{i}"} for i in range(5)]
+        with patch.object(generator, "wiktionary_audio", new=flaky_audio), \
+             patch.object(generator, "google_tts_audio", new=lambda word: None):
+            generator.enrich_audio(cards, [], None)
+        self.assertTrue(all(card["audio"] for card in cards))
+        self.assertTrue(all(count > 1 for count in attempts.values()))
+
     def test_real_package_boundary_with_fake_ai_and_audio(self):
         card = {"word": "apple", "part_of_speech": "n", "ipa": "/ˈæp.əl/", "vietnamese_meaning": "táo",
                 "word_forms": "apples (n)", "example_sentence": "I ate an apple.", "synonyms": ["fruit"],

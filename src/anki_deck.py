@@ -362,11 +362,27 @@ def enrich_audio(cards: list[dict], reverse_cards: list[dict], audio_dir: Path |
         )
         return key, audio
 
-    # ponytail: cap audio requests at 8 concurrent words to limit service load.
-    for start in range(0, len(unique_terms), 8):
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = [executor.submit(copy_context().run, fetch, item) for item in unique_terms[start:start + 8]]
-            cache.update(future.result() for future in futures)
+    def fetch_batches(items: list[tuple[str, str]], size: int) -> None:
+        for start in range(0, len(items), size):
+            batch = items[start:start + size]
+            with ThreadPoolExecutor(max_workers=size) as executor:
+                futures = [executor.submit(copy_context().run, fetch, item) for item in batch]
+                cache.update(future.result() for future in futures)
+
+    # ponytail: retry rate-limited audio in smaller groups; final failures keep silent cards.
+    fetch_batches(unique_terms, 8)
+    def rate_limited(key: str) -> bool:
+        return any(re.search(r"\b(?:429|439)\b", entry) for entry in trace_cache[key])
+
+    for size in (4, 2, 1):
+        deferred = [item for item in unique_terms if cache.get(item[0]) is None and rate_limited(item[0])]
+        if not deferred:
+            break
+        fetch_batches(deferred, size)
+
+    rate_limited_words = [text for key, text in unique_terms if cache.get(key) is None and rate_limited(key)]
+    if rate_limited_words:
+        msg("Cảnh báo", f"Không thể lấy audio cho {len(rate_limited_words)} từ do lỗi server: {', '.join(rate_limited_words)}")
 
     by_word = {card["word"].casefold(): cache.get(card["word"].casefold()) for card in cards}
     for card in cards:
