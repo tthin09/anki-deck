@@ -133,7 +133,7 @@ def progress(job: dict, line: str):
 def convert(job_id: str, words: list[str]):
     job = jobs[job_id]
     token = progress_sink.set(lambda line: progress(job, line))
-    output = DATA / "archive" / f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{job_id}.apkg"
+    output = DATA / "history" / f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{job_id}.apkg"
     try:
         key = os.environ["GEMINI_API_KEY"]
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -142,7 +142,7 @@ def convert(job_id: str, words: list[str]):
         generate_package(ROOT, config, words, output)
         # ponytail: one process holds this lock; use a database if multiple server workers are needed.
         with lock:
-            path = DATA / "conversions.csv"
+            path = DATA / "history" / "conversions.csv"
             with path.open("a", encoding="utf-8", newline="") as file:
                 writer = csv.writer(file)
                 if file.tell() == 0:

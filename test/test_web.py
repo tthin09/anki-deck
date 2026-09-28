@@ -54,7 +54,7 @@ class WebFlow(unittest.TestCase):
         self.assertEqual(self.client.post("/api/logout").status_code, 200)
         self.assertEqual(self.client.get("/api/me").status_code, 401)
 
-    def test_conversion_archive_progress_ownership_and_one_download(self):
+    def test_conversion_history_progress_ownership_and_one_download(self):
         self.login()
         def fake_generate(root, config, words, output):
             self.assertEqual(words, ["Apple", "book"])
@@ -85,8 +85,8 @@ class WebFlow(unittest.TestCase):
             result = self.client.get(f"/api/jobs/{job_id}/download")
             self.assertEqual(result.content, b"sample package")
             self.assertEqual(self.client.get(f"/api/jobs/{job_id}/download").status_code, 404)
-            self.assertEqual(len(list((self.data / "archive").glob("*.apkg"))), 1)
-            with (self.data / "conversions.csv").open(encoding="utf-8", newline="") as file:
+            self.assertEqual(len(list((self.data / "history").glob("*.apkg"))), 1)
+            with (self.data / "history" / "conversions.csv").open(encoding="utf-8", newline="") as file:
                 rows = list(csv.DictReader(file))
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["uploader"], "alice")
@@ -103,8 +103,8 @@ class WebFlow(unittest.TestCase):
                 with self.client.stream("GET", f"/api/jobs/{job_id}/events") as response:
                     self.assertIn('"type": "done"', "".join(response.iter_text()))
             self.assertEqual([self.client.get(f"/api/jobs/{job_id}/download").content for job_id in ids], [b"apple", b"book"])
-        self.assertEqual(len(list((self.data / "archive").glob("*.apkg"))), 2)
-        with (self.data / "conversions.csv").open(encoding="utf-8", newline="") as file:
+        self.assertEqual(len(list((self.data / "history").glob("*.apkg"))), 2)
+        with (self.data / "history" / "conversions.csv").open(encoding="utf-8", newline="") as file:
             self.assertEqual(len(list(csv.DictReader(file))), 2)
 
     def test_real_package_boundary_with_fake_ai_and_audio(self):
@@ -153,8 +153,8 @@ class WebFlow(unittest.TestCase):
             self.assertIn('"type": "failed"', output)
             self.assertNotIn("secret", output)
             self.assertEqual(self.client.get(f"/api/jobs/{job_id}/download").status_code, 404)
-            self.assertFalse((self.data / "conversions.csv").exists())
-            self.assertEqual(list((self.data / "archive").glob("*.apkg")), [])
+            self.assertFalse((self.data / "history" / "conversions.csv").exists())
+            self.assertEqual(list((self.data / "history").glob("*.apkg")), [])
 
 
 if __name__ == "__main__":
