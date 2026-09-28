@@ -240,7 +240,8 @@ def download_audio(
                 return path
         except HTTPError as exc:
             if exc.code not in AUDIO_DOWNLOAD_RETRY_CODES or attempt == AUDIO_DOWNLOAD_RETRIES - 1:
-                raise RuntimeError(f"tải audio thất bại ({exc.code})") from exc
+                body = exc.read().decode("utf-8", errors="replace")
+                raise RuntimeError(f"tải audio thất bại ({exc.code}): {body or exc.reason}") from exc
             retry_after = exc.headers.get("Retry-After") if exc.headers else None
             try:
                 delay = min(30.0, max(1.0, float(retry_after)))
@@ -315,7 +316,7 @@ def resolve_audio(
                 if trace is not None:
                     trace.append(f"{source.__name__}: download error ({exc})")
                 if announce:
-                    msg("Cảnh báo", f"Audio '{text}': {name} tải thất bại, thử nguồn tiếp theo.")
+                    msg("Cảnh báo", f"Audio '{text}': {name} tải thất bại: {exc}. Thử nguồn tiếp theo.")
                 continue
         if audio:
             if trace is not None:
