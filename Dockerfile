@@ -7,7 +7,7 @@ RUN npm run build
 
 FROM python:3.12-slim
 WORKDIR /app
-RUN pip install --no-cache-dir fastapi uvicorn genanki==0.13.1 openpyxl 'setuptools<81'
+RUN pip install --no-cache-dir fastapi uvicorn genanki==0.13.1 'setuptools<81'
 COPY src/anki_deck.py src/web_app.py src/agent-prompt.md src/reverse-prompt.md /app/src/
 COPY --from=frontend /web/dist /app/web/dist
 ENV ANKI_DATA_DIR=/data PYTHONUNBUFFERED=1

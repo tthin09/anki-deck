@@ -134,11 +134,11 @@ class WebFlow(unittest.TestCase):
             cards[0]["audio"] = audio
             reverse_cards[0]["audio"] = audio
 
+        self.assertFalse(hasattr(generator, "import_apkg"))
+        self.assertFalse(hasattr(generator, "anki"))
         with patch.object(generator, "gemini_cards", return_value=[card]) as ai, \
              patch.object(generator, "gemini_reverse_cards", return_value=[reverse]), \
-             patch.object(generator, "enrich_audio", side_effect=fake_audio), \
-             patch.object(generator, "import_apkg", side_effect=AssertionError("AnkiConnect must not run")), \
-             patch.object(generator, "write_excel", side_effect=AssertionError("Excel must not run")):
+             patch.object(generator, "enrich_audio", side_effect=fake_audio):
             result = self.data / "apple.apkg"
             generator.generate_package(Path(__file__).resolve().parents[1],
                                        {"gemini_api_key": "fake", "chunk_size": 30, "deck_name": "English Vocabulary"},

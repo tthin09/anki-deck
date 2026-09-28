@@ -1,29 +1,22 @@
 from __future__ import annotations
 
-import argparse
 from contextvars import ContextVar, copy_context
-import html
 import hashlib
+import html
 import json
 import random
 import re
 import socket
-import sqlite3
 import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
-import zipfile
-from contextlib import contextmanager, redirect_stdout
-from copy import copy
-from datetime import datetime
-from io import StringIO
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
-import openpyxl
 import genanki
 
 for stream in (sys.stdout, sys.stderr):
@@ -94,13 +87,6 @@ AUDIO_DOWNLOAD_RETRY_CODES = {429, 500, 502, 503, 504}
 PARTS_OF_SPEECH = {"n", "v", "adj", "adv", "np", "vp", "adjp", "advp", "s"}
 
 
-def app_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    path = Path(__file__).resolve()
-    return path.parent.parent if path.parent.name == "src" else path.parent
-
-
 def src_dir(root: Path) -> Path:
     return root / "src"
 
@@ -139,56 +125,8 @@ def log_step_progress() -> None:
         msg("Đang chạy", f"{text} ({time.perf_counter() - started:.1f}s)")
 
 
-def load_config(root: Path) -> dict:
-    path = src_dir(root) / "config.json"
-    if not path.exists():
-        raise RuntimeError("Không tìm thấy src/config.json. Hãy tạo file này từ src/config.example.json.")
-    try:
-        config = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("Không đọc được src/config.json. Hãy kiểm tra file JSON và quyền truy cập.") from exc
-    if not config.get("gemini_api_key") or config["gemini_api_key"].startswith("YOUR_"):
-        raise RuntimeError("Chưa cấu hình gemini_api_key trong config.json.")
-    config.setdefault("model", "gemini-3.1-flash-lite")
-    config.setdefault("deck_name", "English Vocabulary")
-    config.setdefault("anki_connect_url", "http://127.0.0.1:8765")
-    config.setdefault("chunk_size", 30)
-    return config
-
-
-def read_words(input_dir: Path) -> list[str]:
-    if not input_dir.exists():
-        raise RuntimeError("Không tìm thấy thư mục input.")
-    words: list[str] = []
-    seen: set[str] = set()
-    for path in sorted(input_dir.glob("*.txt")):
-        try:
-            lines = path.read_text(encoding="utf-8-sig").splitlines()
-        except PermissionError as exc:
-            raise RuntimeError(
-                "Hãy điền từ vựng vào notepad, lưu, và đóng file đó lại trước."
-            ) from exc
-        except UnicodeError as exc:
-            raise RuntimeError(f"{path.name} không phải file UTF-8 hợp lệ.") from exc
-        for line in lines:
-            word = line.strip()
-            key = word.casefold()
-            if word and key not in seen:
-                seen.add(key)
-                words.append(word)
-    if not words:
-        raise RuntimeError("Hãy điền từ vựng vào notepad, lưu, và đóng file đó lại trước.")
-    return words
-
-
 def chunks(items: list[str], size: int) -> list[list[str]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
-
-
-def shuffled(items: list[str]) -> list[str]:
-    items = items[:]
-    random.shuffle(items)
-    return items
 
 
 def post_json(url: str, payload: dict, headers: dict | None = None, timeout: int = 60) -> dict:
@@ -451,7 +389,7 @@ def gemini_json(items: list[dict | str], prompt: str, schema: dict, config: dict
         text = response["candidates"][0]["content"]["parts"][0]["text"]
         return json.loads(text)
     except (KeyError, IndexError, json.JSONDecodeError) as exc:
-        raise RuntimeError("AI trả về dữ liệu không đọc được. Chưa thêm thẻ vào Anki.") from exc
+        raise RuntimeError("AI trả về dữ liệu không đọc được. Chưa tạo bộ thẻ.") from exc
 
 
 def gemini_cards(words: list[str], prompt: str, config: dict) -> list[dict]:
@@ -477,17 +415,17 @@ def gemini_reverse_cards(cards: list[dict], prompt: str, config: dict) -> list[d
 def validate_cards(data: dict) -> list[dict]:
     cards = data.get("cards")
     if not isinstance(cards, list) or not cards:
-        raise RuntimeError("AI không trả về danh sách thẻ hợp lệ. Chưa thêm thẻ vào Anki.")
+        raise RuntimeError("AI không trả về danh sách thẻ hợp lệ. Chưa tạo bộ thẻ.")
     required = set(CARD_SCHEMA["properties"]["cards"]["items"]["required"])
     for card in cards:
         if not isinstance(card, dict) or required - card.keys():
-            raise RuntimeError("AI trả về thẻ thiếu dữ liệu. Chưa thêm thẻ vào Anki.")
+            raise RuntimeError("AI trả về thẻ thiếu dữ liệu. Chưa tạo bộ thẻ.")
         if not isinstance(card["synonyms"], list):
-            raise RuntimeError("AI trả về synonyms không hợp lệ. Chưa thêm thẻ vào Anki.")
+            raise RuntimeError("AI trả về synonyms không hợp lệ. Chưa tạo bộ thẻ.")
     for card in cards:
         parts = str(card["part_of_speech"]).split("/")
         if any(part not in PARTS_OF_SPEECH for part in parts) or len(set(parts)) != len(parts):
-            raise RuntimeError(f"AI trả về part_of_speech không hợp lệ cho '{card['word']}'. Chưa thêm thẻ vào Anki.")
+            raise RuntimeError(f"AI trả về part_of_speech không hợp lệ cho '{card['word']}'. Chưa tạo bộ thẻ.")
     return cards
 
 
@@ -498,7 +436,7 @@ def normalize_sentence(text: str) -> str:
 def answer_text(sentence: str) -> str:
     matches = re.findall(r"<str>(.*?)</str>", sentence, flags=re.IGNORECASE | re.DOTALL)
     if len(matches) != 1 or not matches[0].strip():
-        raise RuntimeError("AI trả về câu luyện tập không hợp lệ. Chưa thêm thẻ vào Anki.")
+        raise RuntimeError("AI trả về câu luyện tập không hợp lệ. Chưa tạo bộ thẻ.")
     return matches[0].strip()
 
 
@@ -524,111 +462,27 @@ def make_reverse_note(card: dict, reverse: dict) -> dict:
 def validate_reverse_cards(cards: list[dict], data: dict) -> list[dict]:
     reverse_cards = data.get("cards")
     if not isinstance(reverse_cards, list) or len(reverse_cards) != len(cards):
-        raise RuntimeError("AI không trả về đủ câu luyện tập. Chưa thêm thẻ vào Anki.")
+        raise RuntimeError("AI không trả về đủ câu luyện tập. Chưa tạo bộ thẻ.")
     by_word = {card["word"].casefold(): card for card in cards}
     validated = []
     for reverse in reverse_cards:
         if not isinstance(reverse, dict) or {"word", "sentence", "vietnamese_hint"} - reverse.keys():
-            raise RuntimeError("AI trả về câu luyện tập thiếu dữ liệu. Chưa thêm thẻ vào Anki.")
+            raise RuntimeError("AI trả về câu luyện tập thiếu dữ liệu. Chưa tạo bộ thẻ.")
         card = by_word.get(str(reverse["word"]).casefold())
         if not card:
-            raise RuntimeError("AI trả về câu luyện tập cho từ không có trong danh sách. Chưa thêm thẻ vào Anki.")
+            raise RuntimeError("AI trả về câu luyện tập cho từ không có trong danh sách. Chưa tạo bộ thẻ.")
         answer_text(reverse["sentence"])
         if normalize_sentence(reverse["sentence"]) == normalize_sentence(card["example_sentence"]):
-            raise RuntimeError("AI trả về câu luyện tập trùng câu ví dụ. Chưa thêm thẻ vào Anki.")
+            raise RuntimeError("AI trả về câu luyện tập trùng câu ví dụ. Chưa tạo bộ thẻ.")
         validated.append(make_reverse_note(card, reverse))
     return validated
 
 
-def next_excel_path(vocabulary_dir: Path) -> Path:
-    vocabulary_dir.mkdir(exist_ok=True)
-    prefix = datetime.now().strftime("%d%m%y")
-    ids = []
-    for path in vocabulary_dir.glob(f"{prefix}-*.*"):
-        match = re.fullmatch(rf"{prefix}-(\d{{2}})(?:-\d+words)?\.(?:xlsx|apkg)", path.name)
-        if match:
-            ids.append(int(match.group(1)))
-    next_id = max(ids, default=0) + 1
-    if next_id > 99:
-        raise RuntimeError("Hôm nay đã tạo 99 file Excel. Hãy xoá bớt file hoặc chạy lại vào ngày khác.")
-    return vocabulary_dir / f"{prefix}-{next_id:02d}.xlsx"
-
-
-def copy_row_style(ws, source_row: int, target_row: int, max_col: int = 6) -> None:
-    ws.row_dimensions[target_row].height = ws.row_dimensions[source_row].height
-    for col in range(1, max_col + 1):
-        src = ws.cell(source_row, col)
-        dst = ws.cell(target_row, col)
-        dst._style = copy(src._style)
-        if src.has_style:
-            dst.font = copy(src.font)
-            dst.fill = copy(src.fill)
-            dst.border = copy(src.border)
-            dst.alignment = copy(src.alignment)
-            dst.number_format = src.number_format
-
-
-def write_excel(root: Path, cards: list[dict], reverse_cards: list[dict]) -> Path:
-    vocabulary_dir = root / "vocabulary"
-    template = vocabulary_dir / "template.xlsx"
-    if not template.exists():
-        raise RuntimeError("Không tìm thấy vocabulary/template.xlsx.")
-    wb = openpyxl.load_workbook(template)
-    ws = wb.active
-    for row in range(2, ws.max_row + 1):
-        for col in range(1, 7):
-            ws.cell(row, col).value = None
-    for index, card in enumerate(cards, start=1):
-        row = index + 1
-        if row > ws.max_row:
-            copy_row_style(ws, 2, row)
-        ws.cell(row, 1).value = index
-        ws.cell(row, 2).value = card["word"]
-        ws.cell(row, 3).value = card["part_of_speech"]
-        ws.cell(row, 4).value = card["vietnamese_meaning"]
-        ws.cell(row, 5).value = card["word_forms"]
-        ws.cell(row, 6).value = card["example_sentence"]
-    if "Reverse" in wb.sheetnames:
-        del wb["Reverse"]
-    reverse_ws = wb.create_sheet("Reverse")
-    reverse_ws.append(["No", "Sentence", "Keyword"])
-    for col in range(1, 4):
-        reverse_ws.cell(1, col)._style = copy(ws.cell(1, min(col, 3))._style)
-    for index, reverse in enumerate(reverse_cards, start=1):
-        reverse_ws.append([index, reverse["front"], reverse["keyword"]])
-    reverse_ws.column_dimensions["A"].width = 11
-    reverse_ws.column_dimensions["B"].width = 80
-    reverse_ws.column_dimensions["C"].width = 24
-    output = next_excel_path(vocabulary_dir)
-    wb.save(output)
-    return output
-
-
-def anki(action: str, params: dict | None, config: dict) -> dict:
-    payload = {"action": action, "version": 6, "params": params or {}}
-    try:
-        response = post_json(config["anki_connect_url"], payload, timeout=15)
-    except RuntimeError as exc:
-        if "Không thể kết nối" in str(exc):
-            raise RuntimeError(
-                "Không kết nối được AnkiConnect. Hãy mở Anki, cài add-on 2055492159 và kiểm tra cổng 8765."
-            ) from exc
-        raise
-    if response.get("error"):
-        raise RuntimeError(str(response["error"]))
-    return response.get("result")
-
-
-def anki_note(deck: str, front: str, back: str, tags: list[str], audio: dict | None, audio_field: str) -> dict:
-    note = {
-        "deckName": deck,
-        "modelName": "Basic",
-        "fields": {"Front": front, "Back": back},
-        "tags": tags,
-    }
+def package_note(front: str, back: str, tags: list[str], audio: dict | None, audio_field: str) -> dict:
+    fields = {"Front": front, "Back": back}
     if audio:
-        note["fields"][audio_field] += f"[sound:{audio['filename']}]" + AUDIO_BUTTON_STYLE
-    return note
+        fields[audio_field] += f"[sound:{audio['filename']}]" + AUDIO_BUTTON_STYLE
+    return {"fields": fields, "tags": tags}
 
 
 def create_apkg(cards: list[dict], reverse_cards: list[dict], deck_name: str, output: Path) -> Path:
@@ -650,8 +504,7 @@ def create_apkg(cards: list[dict], reverse_cards: list[dict], deck_name: str, ou
     ):
         for item in items:
             audio = item.get("audio")
-            note = anki_note(
-                deck_name,
+            note = package_note(
                 item[front_key],
                 item[back_key],
                 ["ai-vocab", tag] if tag == "reverse" else [tag],
@@ -672,42 +525,6 @@ def create_apkg(cards: list[dict], reverse_cards: list[dict], deck_name: str, ou
     package = genanki.Package(deck, media_files=[str(path) for path in media.values()])
     package.write_to_file(str(output))
     return output
-
-
-def import_apkg(path: Path, deck: str, config: dict) -> None:
-    if not path.is_file():
-        raise RuntimeError(f"Không tìm thấy gói Anki: {path.name}")
-    check_anki(config)
-    anki("createDeck", {"deck": deck}, config)
-    enable_anki_autoplay(deck, config)
-    if anki("importPackage", {"path": path.resolve().as_posix()}, config) is not True:
-        raise RuntimeError(f"Anki không nhập được gói: {path.name}")
-
-
-def enable_anki_autoplay(deck: str, config: dict) -> None:
-    try:
-        deck_config = anki("getDeckConfig", {"deck": deck}, config)
-        if not isinstance(deck_config, dict):
-            raise RuntimeError("AnkiConnect trả về cấu hình bộ thẻ không hợp lệ.")
-        if deck_config.get("autoplay") is True:
-            return
-        deck_config["autoplay"] = True
-        if anki("saveDeckConfig", {"config": deck_config}, config) is not True:
-            raise RuntimeError("Anki không lưu được cấu hình tự động phát audio.")
-    except RuntimeError as exc:
-        raise RuntimeError(
-            "Không thể bật tự động phát audio trong Anki. Hãy kiểm tra AnkiConnect rồi chạy lại."
-        ) from exc
-
-
-def check_anki(config: dict) -> None:
-    try:
-        anki("version", None, config)
-    except RuntimeError as exc:
-        raise RuntimeError(
-            "Anki chưa được mở hoặc AnkiConnect chưa hoạt động. "
-            "Hãy mở Anki, cài add-on 2055492159 nếu cần, rồi chạy lại run.exe."
-        ) from exc
 
 
 def generate_package(root: Path, config: dict, words: list[str], output: Path) -> Path:
@@ -734,401 +551,3 @@ def generate_cards(words: list[str], prompt: str, reverse_prompt: str, config: d
         with timed_step(f"Dùng AI tạo thẻ luyện tập, đợt {index}/{len(reverse_batches)} ({len(batch)} từ)"):
             all_reverse_cards.extend(gemini_reverse_cards(batch, reverse_prompt, config))
     return all_cards, all_reverse_cards
-
-
-def generate_and_add(
-    root: Path,
-    config: dict,
-    words: list[str],
-    prompt: str,
-    reverse_prompt: str,
-    deck_name: str | None = None,
-) -> int:
-    all_cards, all_reverse_cards = generate_cards(words, prompt, reverse_prompt, config)
-    with tempfile.TemporaryDirectory(prefix="anki-deck-audio-") as temp_dir:
-        audio_dir = Path(temp_dir)
-        with timed_step("Lấy audio phát âm từ Wiktionary và Google TTS"):
-            enrich_audio(all_cards, all_reverse_cards, audio_dir)
-        with timed_step("Tạo file Excel"):
-            excel_path = write_excel(root, all_cards, all_reverse_cards)
-        msg("OK", f"File Excel: {excel_path.relative_to(root)}")
-        target_deck = deck_name or config["deck_name"]
-        apkg_path = excel_path.with_name(f"{excel_path.stem}-{len(all_cards)}words.apkg")
-        with timed_step("Đóng gói thẻ và audio thành APKG"):
-            create_apkg(all_cards, all_reverse_cards, target_deck, apkg_path)
-        msg("OK", f"File APKG: {apkg_path.relative_to(root)}")
-        with timed_step("Nhập gói vào Anki qua AnkiConnect"):
-            import_apkg(apkg_path, target_deck, config)
-    note_count = len(all_cards) + len(all_reverse_cards)
-    msg("OK", f"Đã nhập gói gồm {note_count} ghi chú vào Anki.")
-    return note_count
-
-
-def run_self_test() -> None:
-    with redirect_stdout(StringIO()) as progress:
-        with timed_step("Kết nối Anki"):
-            pass
-    assert re.fullmatch(r"\[OK       \] Hoàn thành trong \d+\.\d+ giây\.", progress.getvalue().splitlines()[-1])
-
-    sample = {
-        "cards": [
-            {
-                "word": "combination",
-                "part_of_speech": "n",
-                "ipa": "/ˌkɑːm.bəˈneɪ.ʃən/",
-                "vietnamese_meaning": "sự kết hợp; tổ hợp",
-                "word_forms": "combine (v); combined (adj)",
-                "example_sentence": "Milk and coffee are a great combination.",
-                "synonyms": ["mix", "blend", "union"],
-                "anki_front_html": "combination (n)<br>/ˌkɑːm.bəˈneɪ.ʃən/<br>Ex: <i>Milk and coffee are a great <b>combination</b>.</i>",
-                "anki_back_html": "sự kết hợp; tổ hợp<br>Synonyms: mix, blend, union",
-            }
-        ]
-    }
-    cards = validate_cards(sample)
-    assert cards[0]["word"] == "combination"
-    invalid_pos = copy(sample)
-    invalid_pos["cards"] = [dict(cards[0], part_of_speech="noun")]
-    try:
-        validate_cards(invalid_pos)
-    except RuntimeError:
-        pass
-    else:
-        raise AssertionError("Unsupported part-of-speech labels must be rejected.")
-    assert is_mp3(b"ID3sample") and is_mp3(b"\xff\xfb\x90") and not is_mp3(b"error 404")
-    assert sorted(shuffled(["a", "b", "c"])) == ["a", "b", "c"]
-    assert is_busy_ai_error(RuntimeError("Gọi API thất bại (503): overloaded"))
-    assert is_busy_ai_error(RuntimeError("Không thể kết nối tới dịch vụ: timed out"))
-    assert not is_busy_ai_error(RuntimeError("Gọi API thất bại (400): bad request"))
-    assert next_excel_path(app_dir() / "vocabulary").name.endswith(".xlsx")
-    notes = [
-        {
-            "deckName": "English Vocabulary",
-            "modelName": "Basic",
-            "fields": {"Front": cards[0]["anki_front_html"], "Back": cards[0]["anki_back_html"]},
-            "tags": ["ai-vocab"],
-        }
-    ]
-    assert notes[0]["fields"]["Front"].startswith("combination")
-    reverse = validate_reverse_cards(
-        cards,
-        {
-            "cards": [
-                {
-                    "word": "combination",
-                    "sentence": "These two ideas form a useful <str>combination</str>.",
-                    "vietnamese_hint": "sự kết hợp",
-                }
-            ]
-        },
-    )
-    assert reverse[0]["back"] == "combination (n)"
-    assert reverse[0]["keyword"] == "combination (n)"
-    assert reverse[0]["answer"] == "combination"
-    assert "___" in reverse[0]["front"]
-    audio = audio_metadata("https://example.com/audio.mp3")
-    assert audio and audio["url"].endswith("audio.mp3")
-    assert audio["filename"].startswith("vocab_") and audio["filename"].endswith(".mp3")
-    assert set(audio) == {"url", "filename"}
-    assert audio_metadata("https://example.com/audio") ["filename"].endswith(".mp3")
-    assert audio_metadata("https://example.com/audio.ogg") is None
-    assert audio_metadata("https://example.com/audio.wav") is None
-    assert audio_metadata("http://example.com/unsafe.mp3") is None
-    wiktionary = wiktionary_audio_from_html(
-        '<h2 id="French">French</h2><source src="//example.com/french.mp3" type="audio/mpeg">'
-        '<h2 id="English">English</h2><source src="//upload.wikimedia.org/english.mp3" type="audio/mpeg">'
-    )
-    assert wiktionary and wiktionary["url"] == "https://upload.wikimedia.org/english.mp3"
-    assert wiktionary_audio_from_html('<h2 id="English">English</h2><source src="http://example.com/audio.mp3" type="audio/mpeg">') is None
-    calls = []
-
-    def missing_source(text):
-        calls.append("missing")
-        return None
-
-    def backup_source(text):
-        calls.append("backup")
-        return {"url": "https://example.com/backup.mp3", "filename": "backup.mp3"}
-
-    def unused_source(text):
-        calls.append("tts")
-        return {"url": "https://example.com/tts.mp3", "filename": "tts.mp3"}
-
-    assert resolve_audio("word", (missing_source, backup_source, unused_source))["filename"] == "backup.mp3"
-    assert calls == ["missing", "backup"]
-    calls.clear()
-    trace = []
-    assert resolve_audio("word", (missing_source, missing_source, unused_source), trace)["filename"] == "tts.mp3"
-    assert calls == ["missing", "missing", "tts"]
-    assert trace == ["missing_source: no audio", "missing_source: no audio", "unused_source: audio found"]
-    trace = []
-
-    def rate_limited_source(text):
-        return {"url": "https://example.com/rate-limited.mp3", "filename": "rate-limited.mp3"}
-
-    def prepare_audio(audio):
-        if audio["filename"] == "rate-limited.mp3":
-            raise RuntimeError("tải audio thất bại (429)")
-        return audio
-
-    assert resolve_audio("word", (rate_limited_source, backup_source), trace, prepare=prepare_audio)["filename"] == "backup.mp3"
-    assert trace == ["rate_limited_source: download error (tải audio thất bại (429))", "backup_source: audio found"]
-    progress = StringIO()
-    with redirect_stdout(progress):
-        assert resolve_audio("progress", (unused_source,), announce=True)["filename"] == "tts.mp3"
-    assert "Audio 'progress': thử unused_source..." in progress.getvalue()
-    assert "Audio 'progress': unused_source đã có sau" in progress.getvalue()
-    assert google_tts_audio("two words")["url"].endswith("q=two%20words")
-    normal_note = anki_note("Deck", "front", "back", ["ai-vocab"], audio, "Front")
-    reverse_note = anki_note("Deck", "front", "back", ["reverse"], audio, "Back")
-    assert f"[sound:{audio['filename']}]" in normal_note["fields"]["Front"]
-    assert f"[sound:{audio['filename']}]" in reverse_note["fields"]["Back"]
-    assert normal_note["fields"]["Front"].endswith(AUDIO_BUTTON_STYLE)
-    assert reverse_note["fields"]["Back"].endswith(AUDIO_BUTTON_STYLE)
-    assert AUDIO_BUTTON_STYLE not in normal_note["fields"]["Back"]
-    assert AUDIO_BUTTON_STYLE not in reverse_note["fields"]["Front"]
-    assert "audio" not in anki_note("Deck", "front", "back", [], None, "Front")
-    original_anki = globals()["anki"]
-    actions = []
-
-    with tempfile.TemporaryDirectory() as package_temp:
-        audio_path = Path(package_temp) / "sample.mp3"
-        audio_path.write_bytes(b"ID3sample")
-        packaged_cards = [{**cards[0], "audio": {"filename": "sample.mp3", "path": str(audio_path)}}]
-        packaged_reverse = [{**reverse[0], "audio": {"filename": "sample.mp3", "path": str(audio_path)}}]
-        apkg_path = create_apkg(packaged_cards, packaged_reverse, "Deck", Path(package_temp) / "deck.apkg")
-        with zipfile.ZipFile(apkg_path) as package_file:
-            media = json.loads(package_file.read("media"))
-            assert "collection.anki2" in package_file.namelist()
-            assert len(media) == 1 and package_file.read(next(iter(media))) == b"ID3sample"
-            collection_path = Path(package_temp) / "collection.anki2"
-            collection_path.write_bytes(package_file.read("collection.anki2"))
-        collection = sqlite3.connect(collection_path)
-        try:
-            assert collection.execute("select count(*) from notes").fetchone()[0] == 2
-        finally:
-            collection.close()
-
-        fail_import = False
-        def fake_import(action, params, config):
-            actions.append((action, params))
-            if action == "version":
-                return 6
-            if action == "getDeckConfig":
-                return {"autoplay": True}
-            if action == "importPackage":
-                assert params["path"] == apkg_path.resolve().as_posix()
-                return not fail_import
-
-        globals()["anki"] = fake_import
-        try:
-            import_apkg(apkg_path, "Deck", {})
-            fail_import = True
-            try:
-                import_apkg(apkg_path, "Deck", {})
-            except RuntimeError:
-                assert apkg_path.is_file()
-            else:
-                raise AssertionError("Failed package imports must retain the APKG for manual import.")
-        finally:
-            globals()["anki"] = original_anki
-    assert [action for action, _ in actions] == [
-        "version", "createDeck", "getDeckConfig", "importPackage",
-        "version", "createDeck", "getDeckConfig", "importPackage",
-    ]
-
-    def fake_anki(action, params, config):
-        actions.append((action, params))
-        if action == "getDeckConfig":
-            return {"id": 1, "autoplay": False, "new": {"perDay": 20}}
-        if action == "saveDeckConfig":
-            return True
-
-    globals()["anki"] = fake_anki
-    try:
-        enable_anki_autoplay("Deck", {})
-    finally:
-        globals()["anki"] = original_anki
-    saved_config = actions[-1][1]["config"]
-    assert saved_config["autoplay"] is True and saved_config["new"]["perDay"] == 20
-
-    def already_enabled(action, params, config):
-        actions.append((action, params))
-        return {"autoplay": True}
-
-    actions.clear()
-    globals()["anki"] = already_enabled
-    try:
-        enable_anki_autoplay("Deck", {})
-    finally:
-        globals()["anki"] = original_anki
-    assert [action for action, _ in actions] == ["getDeckConfig"]
-
-    def save_fails(action, params, config):
-        return {"autoplay": False} if action == "getDeckConfig" else False
-
-    globals()["anki"] = save_fails
-    try:
-        try:
-            enable_anki_autoplay("Deck", {})
-        except RuntimeError as exc:
-            assert "Không thể bật tự động phát audio" in str(exc)
-        else:
-            raise AssertionError("Lưu autoplay thất bại phải dừng tạo thẻ.")
-    finally:
-        globals()["anki"] = original_anki
-    output = StringIO()
-    with redirect_stdout(output):
-        with timed_step("Kiểm tra thời gian"):
-            log_step_progress()
-            pass
-        try:
-            with timed_step("Kiểm tra lỗi"):
-                raise ValueError("test")
-        except ValueError:
-            pass
-    assert re.search(r"Hoàn thành trong \d+\.\d giây", output.getvalue())
-    assert re.search(r"thất bại sau \d+\.\d giây", output.getvalue())
-    assert "[Đang chạy]" in output.getvalue()
-    assert re.search(r"Kiểm tra thời gian \(\d+\.\d+s\)", output.getvalue())
-    assert "[OK       ]" in output.getvalue()
-    assert "[Lỗi      ]" in output.getvalue()
-    with tempfile.TemporaryDirectory() as empty_input:
-        try:
-            read_words(Path(empty_input))
-        except RuntimeError as exc:
-            assert str(exc) == "Hãy điền từ vựng vào notepad, lưu, và đóng file đó lại trước."
-        else:
-            raise AssertionError("Thư mục input trống phải báo lỗi.")
-    msg("OK", "Tự kiểm tra thành công.")
-
-
-def run_diagnostics(root: Path) -> int:
-    report_path = root / "bao-cao-kiem-tra.txt"
-    results: list[str] = []
-
-    def check(name: str, test) -> None:
-        started = time.perf_counter()
-        try:
-            detail = test()
-            results.append(f"[OK] {name} ({time.perf_counter() - started:.1f} giây)" + (f": {detail}" if detail else ""))
-        except Exception as exc:
-            results.append(f"[LỖI] {name} ({time.perf_counter() - started:.1f} giây): {exc}")
-
-    required = [
-        "run.exe",
-        "src/config.json",
-        "src/agent-prompt.md",
-        "src/reverse-prompt.md",
-        "vocabulary/template.xlsx",
-    ]
-    for relative in required:
-        check(relative, lambda relative=relative: "đã tìm thấy" if (root / relative).is_file() else (_ for _ in ()).throw(RuntimeError("thiếu file")))
-
-    def valid_template() -> str:
-        workbook = openpyxl.load_workbook(root / "vocabulary" / "template.xlsx", read_only=True)
-        workbook.close()
-        return "mở được"
-
-    check("Tự kiểm tra chương trình", lambda: (run_self_test(), "thành công")[1])
-    check("Mẫu Excel", valid_template)
-    check("Đọc cấu hình", lambda: f"model={load_config(root)['model']} (khóa API đã được ẩn)")
-    check("Đọc file input", lambda: f"{len(read_words(root / 'input'))} từ/cụm từ")
-    def check_audio_sources() -> str:
-        with tempfile.TemporaryDirectory() as audio_temp:
-            trace: list[str] = []
-            audio = resolve_audio(
-                "hello",
-                (wiktionary_audio, google_tts_audio),
-                trace,
-                prepare=lambda item: {**item, "path": str(download_audio(item, Path(audio_temp)))},
-            )
-            if not audio:
-                raise RuntimeError("; ".join(trace))
-            return f"đã tải audio ({trace[-1]})"
-
-    check("Audio Wiktionary / Google TTS", check_audio_sources)
-
-    def writable() -> str:
-        folder = root / "vocabulary"
-        folder.mkdir(exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=folder, prefix="kiem-tra-", delete=True):
-            pass
-        return "có quyền ghi"
-
-    check("Thư mục vocabulary", writable)
-
-    config: dict | None = None
-    try:
-        config = load_config(root)
-    except RuntimeError:
-        pass
-
-    if config:
-        schema = {
-            "type": "object",
-            "properties": {"ok": {"type": "boolean"}},
-            "required": ["ok"],
-        }
-        check(
-            "Gemini API (yêu cầu thử tối thiểu)",
-            lambda: "khóa, mạng và model hoạt động"
-            if gemini_json(["test"], "Return {\"ok\": true}.", schema, config).get("ok") is True
-            else (_ for _ in ()).throw(RuntimeError("phản hồi thử không hợp lệ")),
-        )
-        check("AnkiConnect", lambda: f"version {anki('version', None, config)}")
-    else:
-        results.extend([
-            "[BỎ QUA] Gemini API: cấu hình chưa hợp lệ",
-            "[BỎ QUA] AnkiConnect: cấu hình chưa hợp lệ",
-        ])
-
-    failed = any(line.startswith("[LỖI]") for line in results)
-    header = [
-        "BÁO CÁO KIỂM TRA ANKI DECK",
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "Lưu ý: Báo cáo không chứa khóa API và không thêm thẻ vào Anki.",
-        "",
-    ]
-    report_path.write_text("\n".join(header + results) + "\n", encoding="utf-8-sig")
-    for line in results:
-        print(line)
-    msg("OK" if not failed else "LỖI", f"Đã lưu báo cáo: {report_path.name}")
-    return 1 if failed else 0
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--self-test", action="store_true")
-    parser.add_argument("--diagnose", action="store_true")
-    parser.add_argument("--no-pause", action="store_true")
-    args = parser.parse_args()
-    try:
-        if args.self_test:
-            run_self_test()
-            return 0
-        root = app_dir()
-        if args.diagnose:
-            return run_diagnostics(root)
-        msg("Lưu ý", "Hãy lưu và đóng tất cả file .txt trong thư mục input trước khi tiếp tục. Nội dung chưa lưu sẽ không được xử lý.")
-        with timed_step("Đọc cấu hình"):
-            config = load_config(root)
-        with timed_step("Đọc file input và prompt"):
-            words = shuffled(read_words(root / "input"))
-            prompt = (src_dir(root) / "agent-prompt.md").read_text(encoding="utf-8")
-            reverse_prompt = (src_dir(root) / "reverse-prompt.md").read_text(encoding="utf-8")
-        generate_and_add(root, config, words, prompt, reverse_prompt)
-        return 0
-    except (RuntimeError, HTTPError) as exc:
-        msg("Lỗi", str(exc))
-        return 1
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        msg("Lỗi", f"Không thể đọc hoặc ghi file. Hãy đóng các file đang mở và kiểm tra quyền truy cập. Chi tiết: {exc}")
-        return 1
-    finally:
-        if getattr(sys, "frozen", False) and not args.no_pause:
-            input("Nhấn Enter để đóng cửa sổ...")
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

@@ -14,12 +14,16 @@ _Avoid_: Upload, batch
 
 **Conversion**:
 The creation of Anki learning cards and their media from a vocabulary list.
-_Avoid_: Import (the package into Anki)
+_Avoid_: Importing the package into Anki as part of the app's conversion
 
 **Deck package**:
-A downloadable `.apkg` file containing the generated vocabulary cards and their media, ready for the learner to import into Anki.
-_Avoid_: Anki import
+A downloadable `.apkg` file containing the generated vocabulary cards and their media. The app creates and delivers the file; the learner may import it into Anki themselves.
+_Avoid_: Anki import (as an app action)
 
 **Conversion record**:
 A record of a completed conversion, identifying its deck package, uploader, creation time, and vocabulary list.
 _Avoid_: User history
+
+## Workflow invariant
+
+The app generates and returns a downloadable deck package. It must never connect to Anki or add cards/decks directly to a user's Anki collection.
