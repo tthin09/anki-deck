@@ -1,2 +1,7 @@
-vocabulary/*
 src/config.json
+.env
+data/
+web/node_modules/
+web/dist/
+__pycache__/
+*.pyc

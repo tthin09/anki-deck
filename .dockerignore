@@ -1,0 +1,14 @@
+.git
+build
+dist
+input
+vocabulary
+*.exe
+*.spec
+src/config.json
+src/__pycache__
+web/node_modules
+web/dist
+data
+.env
+.tmp-selftest
