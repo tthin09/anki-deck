@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import html
 import hashlib
 import json
 import random
 import re
 import socket
+import sqlite3
 import sys
 import tempfile
 import time
+import zipfile
 from contextlib import contextmanager, redirect_stdout
 from copy import copy
 from datetime import datetime
@@ -21,6 +22,7 @@ from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 import openpyxl
+import genanki
 
 for stream in (sys.stdout, sys.stderr):
     if hasattr(stream, "reconfigure"):
@@ -197,7 +199,7 @@ def post_json(url: str, payload: dict, headers: dict | None = None, timeout: int
         raise RuntimeError(f"Không thể kết nối tới dịch vụ: {exc}") from exc
 
 
-def get_json(url: str, timeout: int = 20):
+def get_json(url: str, timeout: int = 8):
     try:
         with urlopen(Request(url, headers={"User-Agent": "anki-deck/1.0"}), timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -564,8 +566,8 @@ def next_excel_path(vocabulary_dir: Path) -> Path:
     vocabulary_dir.mkdir(exist_ok=True)
     prefix = datetime.now().strftime("%d%m%y")
     ids = []
-    for path in vocabulary_dir.glob(f"{prefix}-*.xlsx"):
-        match = re.fullmatch(rf"{prefix}-(\d{{2}})\.xlsx", path.name)
+    for path in vocabulary_dir.glob(f"{prefix}-*.*"):
+        match = re.fullmatch(rf"{prefix}-(\d{{2}})\.(?:xlsx|apkg)", path.name)
         if match:
             ids.append(int(match.group(1)))
     next_id = max(ids, default=0) + 1
@@ -651,6 +653,59 @@ def anki_note(deck: str, front: str, back: str, tags: list[str], audio: dict | N
     return note
 
 
+def create_apkg(cards: list[dict], reverse_cards: list[dict], deck_name: str, output: Path) -> Path:
+    deck_id = (int.from_bytes(hashlib.sha256(deck_name.encode("utf-8")).digest()[:4], "big") % (1 << 30)) + (1 << 30)
+    models = [
+        genanki.Model(
+            model_id,
+            name,
+            fields=[{"name": "Front"}, {"name": "Back"}],
+            templates=[{"name": "Card 1", "qfmt": "{{Front}}", "afmt": '{{FrontSide}}<hr id="answer">{{Back}}'}],
+        )
+        for model_id, name in ((1690123450, "Vocabulary Generator"), (1690123451, "Vocabulary Generator Reverse"))
+    ]
+    deck = genanki.Deck(deck_id, deck_name)
+    media = {}
+    for items, model, front_key, back_key, tag in (
+        (cards, models[0], "anki_front_html", "anki_back_html", "ai-vocab"),
+        (reverse_cards, models[1], "front", "back", "reverse"),
+    ):
+        for item in items:
+            audio = item.get("audio")
+            note = anki_note(
+                deck_name,
+                item[front_key],
+                item[back_key],
+                ["ai-vocab", tag] if tag == "reverse" else [tag],
+                audio,
+                "Front",
+            )
+            deck.add_note(genanki.Note(
+                model=model,
+                fields=[note["fields"]["Front"], note["fields"]["Back"]],
+                tags=note["tags"],
+                guid=genanki.guid_for(tag, item["word"].casefold()),
+            ))
+            if audio:
+                audio_path = Path(audio["path"])
+                if not audio_path.is_file():
+                    raise RuntimeError(f"Không tìm thấy file audio tạm: {audio_path.name}")
+                media[audio["filename"]] = audio_path
+    package = genanki.Package(deck, media_files=[str(path) for path in media.values()])
+    package.write_to_file(str(output))
+    return output
+
+
+def import_apkg(path: Path, deck: str, config: dict) -> None:
+    if not path.is_file():
+        raise RuntimeError(f"Không tìm thấy gói Anki: {path.name}")
+    check_anki(config)
+    anki("createDeck", {"deck": deck}, config)
+    enable_anki_autoplay(deck, config)
+    if anki("importPackage", {"path": path.resolve().as_posix()}, config) is not True:
+        raise RuntimeError(f"Anki không nhập được gói: {path.name}")
+
+
 def enable_anki_autoplay(deck: str, config: dict) -> None:
     try:
         deck_config = anki("getDeckConfig", {"deck": deck}, config)
@@ -665,58 +720,6 @@ def enable_anki_autoplay(deck: str, config: dict) -> None:
         raise RuntimeError(
             "Không thể bật tự động phát audio trong Anki. Hãy kiểm tra AnkiConnect rồi chạy lại."
         ) from exc
-
-
-def store_audio_files(cards: list[dict], reverse_cards: list[dict], config: dict) -> None:
-    stored: set[str] = set()
-    for item in [*cards, *reverse_cards]:
-        audio = item.get("audio")
-        if not audio or audio["filename"] in stored:
-            continue
-        path = Path(audio.get("path", ""))
-        if not path.is_file():
-            raise RuntimeError(f"Không tìm thấy file audio tạm: {path.name or audio['filename']}")
-        result = anki(
-            "storeMediaFile",
-            {
-                "filename": audio["filename"],
-                "data": base64.b64encode(path.read_bytes()).decode("ascii"),
-                "deleteExisting": True,
-            },
-            config,
-        )
-        if result != audio["filename"]:
-            raise RuntimeError(f"Anki không lưu được audio: {audio['filename']}")
-        stored.add(audio["filename"])
-
-
-def add_to_anki(cards: list[dict], reverse_cards: list[dict], config: dict) -> int:
-    anki("version", None, config)
-    deck = config["deck_name"]
-    anki("createDeck", {"deck": deck}, config)
-    enable_anki_autoplay(deck, config)
-    store_audio_files(cards, reverse_cards, config)
-    normal_notes = [
-        anki_note(deck, card["anki_front_html"], card["anki_back_html"], ["ai-vocab"], card.get("audio"), "Front")
-        for card in shuffled(cards)
-    ]
-    reverse_notes = [
-        anki_note(deck, reverse["front"], reverse["back"], ["ai-vocab", "reverse"], reverse.get("audio"), "Back")
-        for reverse in shuffled(reverse_cards)
-    ]
-    notes = []
-    for batch in (normal_notes, reverse_notes):
-        allowed = anki("canAddNotes", {"notes": batch}, config)
-        notes.extend(note for note, ok in zip(batch, allowed) if ok)
-    if not notes:
-        raise RuntimeError("Không có thẻ mới để thêm vào Anki. Có thể các thẻ này đã tồn tại.")
-    result = anki("addNotes", {"notes": notes}, config)
-    if not isinstance(result, list) or len(result) != len(notes):
-        raise RuntimeError("Anki trả về kết quả thêm thẻ không hợp lệ.")
-    added = sum(note_id is not None for note_id in result)
-    if added != len(notes):
-        raise RuntimeError(f"Anki chỉ thêm được {added}/{len(notes)} thẻ. Hãy kiểm tra các thẻ bị từ chối trong Anki.")
-    return added
 
 
 def check_anki(config: dict) -> None:
@@ -754,11 +757,16 @@ def generate_and_add(
         with timed_step("Tạo file Excel"):
             excel_path = write_excel(root, all_cards, all_reverse_cards)
         msg("OK", f"File Excel: {excel_path.relative_to(root)}")
-        add_config = {**config, "deck_name": deck_name} if deck_name else config
-        with timed_step("Thêm thẻ và audio vào Anki"):
-            added = add_to_anki(all_cards, all_reverse_cards, add_config)
-    msg("OK", f"Đã thêm {added} thẻ vào Anki.")
-    return added
+        target_deck = deck_name or config["deck_name"]
+        apkg_path = excel_path.with_suffix(".apkg")
+        with timed_step("Đóng gói thẻ và audio thành APKG"):
+            create_apkg(all_cards, all_reverse_cards, target_deck, apkg_path)
+        msg("OK", f"File APKG: {apkg_path.relative_to(root)}")
+        with timed_step("Nhập gói vào Anki qua AnkiConnect"):
+            import_apkg(apkg_path, target_deck, config)
+    note_count = len(all_cards) + len(all_reverse_cards)
+    msg("OK", f"Đã nhập gói gồm {note_count} ghi chú vào Anki.")
+    return note_count
 
 
 def run_self_test() -> None:
@@ -898,17 +906,51 @@ def run_self_test() -> None:
     original_anki = globals()["anki"]
     actions = []
 
-    with tempfile.TemporaryDirectory() as audio_temp:
-        audio_path = Path(audio_temp) / "sample.mp3"
+    with tempfile.TemporaryDirectory() as package_temp:
+        audio_path = Path(package_temp) / "sample.mp3"
         audio_path.write_bytes(b"ID3sample")
-        globals()["anki"] = lambda action, params, config: actions.append((action, params)) or params["filename"]
+        packaged_cards = [{**cards[0], "audio": {"filename": "sample.mp3", "path": str(audio_path)}}]
+        packaged_reverse = [{**reverse[0], "audio": {"filename": "sample.mp3", "path": str(audio_path)}}]
+        apkg_path = create_apkg(packaged_cards, packaged_reverse, "Deck", Path(package_temp) / "deck.apkg")
+        with zipfile.ZipFile(apkg_path) as package_file:
+            media = json.loads(package_file.read("media"))
+            assert "collection.anki2" in package_file.namelist()
+            assert len(media) == 1 and package_file.read(next(iter(media))) == b"ID3sample"
+            collection_path = Path(package_temp) / "collection.anki2"
+            collection_path.write_bytes(package_file.read("collection.anki2"))
+        collection = sqlite3.connect(collection_path)
         try:
-            store_audio_files([{"audio": {"filename": "sample.mp3", "path": str(audio_path)}}], [], {})
+            assert collection.execute("select count(*) from notes").fetchone()[0] == 2
+        finally:
+            collection.close()
+
+        fail_import = False
+        def fake_import(action, params, config):
+            actions.append((action, params))
+            if action == "version":
+                return 6
+            if action == "getDeckConfig":
+                return {"autoplay": True}
+            if action == "importPackage":
+                assert params["path"] == apkg_path.resolve().as_posix()
+                return not fail_import
+
+        globals()["anki"] = fake_import
+        try:
+            import_apkg(apkg_path, "Deck", {})
+            fail_import = True
+            try:
+                import_apkg(apkg_path, "Deck", {})
+            except RuntimeError:
+                assert apkg_path.is_file()
+            else:
+                raise AssertionError("Failed package imports must retain the APKG for manual import.")
         finally:
             globals()["anki"] = original_anki
-    stored_payload = actions[-1][1]
-    assert stored_payload["data"] == base64.b64encode(b"ID3sample").decode("ascii")
-    assert "path" not in stored_payload
+    assert [action for action, _ in actions] == [
+        "version", "createDeck", "getDeckConfig", "importPackage",
+        "version", "createDeck", "getDeckConfig", "importPackage",
+    ]
 
     def fake_anki(action, params, config):
         actions.append((action, params))
@@ -1082,8 +1124,6 @@ def main() -> int:
             words = shuffled(read_words(root / "input"))
             prompt = (src_dir(root) / "agent-prompt.md").read_text(encoding="utf-8")
             reverse_prompt = (src_dir(root) / "reverse-prompt.md").read_text(encoding="utf-8")
-        with timed_step("Kiểm tra Anki và AnkiConnect"):
-            check_anki(config)
         generate_and_add(root, config, words, prompt, reverse_prompt)
         return 0
     except (RuntimeError, HTTPError) as exc:

@@ -12,8 +12,8 @@ The packaged `run.exe` needs no Python installation, but it must be distributed 
 1. Read and deduplicate UTF-8 `.txt` files from `input/`.
 2. Ask Gemini for vocabulary data and reverse practice sentences.
 3. Resolve pronunciation media through DictionaryAPI, Wiktionary, then Google Translate TTS.
-4. Write the review workbook to `vocabulary/`.
-5. Download audio to a temporary local folder, store it in Anki through AnkiConnect, then remove the temporary files.
+4. Write the review workbook and a self-contained `.apkg` with audio to `vocabulary/`.
+5. Import the `.apkg` into Anki through AnkiConnect. The package remains available if Anki is closed or import fails.
 
 Every major phase logs when it starts and whether it completed or failed, including elapsed seconds. Status labels use a fixed-width column such as `[Đang chạy]` and `[OK       ]`. Audio lookup failures are non-fatal; the text-only card is still created only if every source fails.
 
@@ -35,15 +35,16 @@ Gemini calls time out after 30 seconds. Transient overload and connection failur
 ## External services
 
 - **Gemini API:** generates structured card content. Each user supplies their own API key.
-- **DictionaryAPI:** primary pronunciation source, paced at one uncached request every 2.5 seconds. Selection priority is US, UK/GB, then any HTTPS recording.
+- **DictionaryAPI:** primary pronunciation source, paced at one uncached request every 2.5 seconds with an 8-second timeout. Selection priority is US, UK/GB, then any HTTPS recording.
 - **Wiktionary:** backup source; the app reads an English entry's HTTPS MP3 recording.
 - **Google Translate TTS:** no-key final fallback for an exact word or phrase. This compatibility endpoint is free but not a supported developer API and may change or throttle.
-- **AnkiConnect:** stores prepared local audio and creates notes. Anki must be open with add-on `2055492159` installed.
+- **AnkiConnect:** imports the generated `.apkg` and applies the deck's autoplay setting. Anki must be open with add-on `2055492159` installed.
 
-Normal-card audio is attached to `Front`. Reverse-card audio is attached to `Back`; the exact displayed answer form is tried first, then the original vocabulary word. No audio source text is shown on cards. The app enables autoplay on the configured deck preset before adding notes.
+Generated `.apkg` files contain both card types and their audio, and can also be imported manually from Anki if AnkiConnect is unavailable.
 
-AnkiConnect receives audio targets as field-name lists (`["Front"]` or `["Back"]`), allowing it to insert the native `[sound:...]` marker into the note.
-The target field also contains local CSS that places Anki's native replay button on its own centered line.
+Normal-card audio is attached to `Front`. Reverse-card audio is attached to `Back`; the exact displayed answer form is tried first, then the original vocabulary word. No audio source text is shown on cards. The app enables autoplay on the configured deck preset before importing the package.
+
+The `.apkg` contains both card types and embeds local audio media. The sound marker is added to the normal card's `Front` and the reverse card's `Back`; local CSS places Anki's native replay button on its own centered line.
 
 ## Run from source
 
@@ -114,7 +115,7 @@ The release workflow packages only runtime resources and `vocabulary/template.xl
 - Media filenames are deterministic URL hashes, preventing unsafe characters and collisions.
 - Only HTTPS MP3 audio URLs, plus extensionless URLs known to return MP3, are accepted. Other formats fall through to the next audio source because MP3 is the most portable mobile format.
 - DictionaryAPI, Wiktionary, and audio-download 429/network failures continue through the fallback chain; remaining failures do not stop card creation.
-- Audio is downloaded and checked before Anki is called. AnkiConnect receives a local file path through `storeMediaFile`, so third-party rate limits cannot silently create text-only cards.
-- The app enables Anki's native autoplay for the configured deck preset; normal replay controls remain available and no custom model or JavaScript is required.
+- Audio is downloaded and checked before package creation. The `.apkg` is saved before AnkiConnect is called, so it remains usable when Anki is closed or import fails.
+- The app enables Anki's native autoplay for the configured deck preset; normal replay controls remain available.
 
 If audio works on desktop but not mobile, enable sound/image syncing on both devices, complete the media sync, and run Anki's Check Media before testing playback.
