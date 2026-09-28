@@ -7,9 +7,12 @@ import json
 import random
 import re
 import socket
+import sqlite3
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
+import zipfile
 from contextlib import contextmanager, redirect_stdout
 from copy import copy
 from datetime import datetime
@@ -20,6 +23,7 @@ from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 import openpyxl
+import genanki
 
 for stream in (sys.stdout, sys.stderr):
     if hasattr(stream, "reconfigure"):
@@ -86,6 +90,7 @@ AUDIO_BUTTON_STYLE = "<style>.replay-button{display:block!important;text-align:c
 AUDIO_DOWNLOAD_RETRIES = 3
 AUDIO_DOWNLOAD_MAX_BYTES = 10 * 1024 * 1024
 AUDIO_DOWNLOAD_RETRY_CODES = {429, 500, 502, 503, 504}
+PARTS_OF_SPEECH = {"n", "v", "adj", "adv", "np", "vp", "adjp", "advp", "s"}
 
 
 def app_dir() -> Path:
@@ -195,35 +200,6 @@ def post_json(url: str, payload: dict, headers: dict | None = None, timeout: int
         raise RuntimeError(f"Không thể kết nối tới dịch vụ: {exc}") from exc
 
 
-def get_json(url: str, timeout: int = 20):
-    try:
-        with urlopen(Request(url, headers={"User-Agent": "anki-deck/1.0"}), timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        raise RuntimeError(f"DictionaryAPI trả về lỗi {exc.code}.") from exc
-    except (URLError, TimeoutError, ConnectionError, socket.timeout, UnicodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Không đọc được DictionaryAPI: {exc}") from exc
-
-
-def select_audio(entries) -> dict | None:
-    candidates = []
-    for entry in entries if isinstance(entries, list) else []:
-        for phonetic in entry.get("phonetics", []) if isinstance(entry, dict) else []:
-            if not isinstance(phonetic, dict):
-                continue
-            url = str(phonetic.get("audio") or "").strip()
-            audio = audio_metadata(url)
-            if not audio:
-                continue
-            marker = urlparse(audio["url"]).path.casefold()
-            rank = 0 if re.search(r"(?:^|[-_/.])us(?:[-_/.]|$)", marker) else 1 if re.search(r"(?:^|[-_/.])(uk|gb)(?:[-_/.]|$)", marker) else 2
-            candidates.append((rank, audio["url"]))
-    if not candidates:
-        return None
-    _, url = min(candidates, key=lambda item: item[0])
-    return audio_metadata(url)
-
-
 def audio_metadata(url: str) -> dict | None:
     url = html.unescape(url.strip())
     if url.startswith("//"):
@@ -253,19 +229,19 @@ def download_audio(
     for attempt in range(AUDIO_DOWNLOAD_RETRIES):
         try:
             with (opener or urlopen)(request, timeout=30) as response:
-                content_type = response.headers.get_content_type()
-                if content_type.startswith("text/"):
-                    raise RuntimeError(f"audio trả về {content_type} thay vì file âm thanh")
                 data = response.read(AUDIO_DOWNLOAD_MAX_BYTES + 1)
                 if not data:
                     raise RuntimeError("audio trả về file rỗng")
                 if len(data) > AUDIO_DOWNLOAD_MAX_BYTES:
                     raise RuntimeError("audio vượt quá giới hạn 10 MB")
+                if not is_mp3(data):
+                    raise RuntimeError("Nguồn audio trả về dữ liệu không phải file MP3.")
                 path.write_bytes(data)
                 return path
         except HTTPError as exc:
             if exc.code not in AUDIO_DOWNLOAD_RETRY_CODES or attempt == AUDIO_DOWNLOAD_RETRIES - 1:
-                raise RuntimeError(f"tải audio thất bại ({exc.code})") from exc
+                body = exc.read().decode("utf-8", errors="replace")
+                raise RuntimeError(f"tải audio thất bại ({exc.code}): {body or exc.reason}") from exc
             retry_after = exc.headers.get("Retry-After") if exc.headers else None
             try:
                 delay = min(30.0, max(1.0, float(retry_after)))
@@ -279,9 +255,8 @@ def download_audio(
     raise RuntimeError("tải audio thất bại")
 
 
-def dictionary_audio(text: str) -> dict | None:
-    url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{quote(text, safe='')}"
-    return select_audio(get_json(url))
+def is_mp3(data: bytes) -> bool:
+    return data.startswith(b"ID3") or (len(data) >= 2 and data[0] == 0xFF and data[1] & 0xE0 == 0xE0)
 
 
 def wiktionary_audio_from_html(page: str) -> dict | None:
@@ -318,10 +293,8 @@ def resolve_audio(
     announce: bool = False,
     prepare=None,
 ) -> dict | None:
-    for source in sources or (dictionary_audio, wiktionary_audio, google_tts_audio):
+    for source in sources or (wiktionary_audio, google_tts_audio):
         name = {
-            "paced_dictionary_audio": "DictionaryAPI",
-            "dictionary_audio": "DictionaryAPI",
             "wiktionary_audio": "Wiktionary",
             "google_tts_audio": "Google TTS",
         }.get(source.__name__, source.__name__)
@@ -343,7 +316,7 @@ def resolve_audio(
                 if trace is not None:
                     trace.append(f"{source.__name__}: download error ({exc})")
                 if announce:
-                    msg("Cảnh báo", f"Audio '{text}': {name} tải thất bại, thử nguồn tiếp theo.")
+                    msg("Cảnh báo", f"Audio '{text}': {name} tải thất bại: {exc}. Thử nguồn tiếp theo.")
                 continue
         if audio:
             if trace is not None:
@@ -361,16 +334,6 @@ def resolve_audio(
 def enrich_audio(cards: list[dict], reverse_cards: list[dict], audio_dir: Path | None = None) -> None:
     cache: dict[str, dict | None] = {}
     trace_cache: dict[str, list[str]] = {}
-    next_dictionary_request = 0.0
-
-    def paced_dictionary_audio(text: str) -> dict | None:
-        nonlocal next_dictionary_request
-        delay = next_dictionary_request - time.monotonic()
-        if delay > 0:
-            msg("Đang chạy", f"Audio '{text}': chờ DictionaryAPI {delay:.1f}s để giữ giới hạn request...")
-            time.sleep(delay)
-        next_dictionary_request = time.monotonic() + 2.5
-        return dictionary_audio(text)
 
     def prepare(audio: dict) -> dict:
         if audio_dir is None:
@@ -378,39 +341,40 @@ def enrich_audio(cards: list[dict], reverse_cards: list[dict], audio_dir: Path |
         path = download_audio(audio, audio_dir)
         return {**audio, "path": str(path)}
 
-    lookup_count = 0
-    total_lookups = len(cards) + len(reverse_cards)
+    terms = {item.casefold(): item for item in
+             [card["word"] for card in cards] + [card["answer"] for card in reverse_cards]}
+    unique_terms = list(terms.items())
 
-    def lookup(text: str) -> dict | None:
-        nonlocal lookup_count
-        lookup_count += 1
-        key = text.casefold()
-        msg("Đang chạy", f"Audio {lookup_count}/{total_lookups}: '{text}'...")
-        if key not in cache:
-            trace_cache[key] = []
-            cache[key] = resolve_audio(
-                text,
-                (paced_dictionary_audio, wiktionary_audio, google_tts_audio),
-                trace_cache[key],
-                announce=True,
-                prepare=prepare,
-            )
-        else:
-            msg("Đang chạy", f"Audio '{text}': dùng kết quả đã lưu.")
-        return cache[key]
+    def fetch(item: tuple[str, str]) -> tuple[str, dict | None]:
+        key, text = item
+        trace_cache[key] = []
+        msg("Đang chạy", f"Audio '{text}'...")
+        audio = resolve_audio(
+            text,
+            (wiktionary_audio, google_tts_audio),
+            trace_cache[key],
+            announce=True,
+            prepare=prepare,
+        )
+        return key, audio
 
-    by_word = {}
+    # ponytail: cap audio requests at 8 concurrent words to limit service load.
+    for start in range(0, len(unique_terms), 8):
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            cache.update(executor.map(fetch, unique_terms[start:start + 8]))
+
+    by_word = {card["word"].casefold(): cache.get(card["word"].casefold()) for card in cards}
     for card in cards:
-        card["audio"] = lookup(card["word"])
+        key = card["word"].casefold()
+        card["audio"] = by_word[key]
         if card["audio"] is None:
             msg(
                 "Cảnh báo",
-                f"Không tìm thấy audio cho '{card['word']}' sau: {'; '.join(trace_cache[card['word'].casefold()])}. "
+                f"Không tìm thấy audio cho '{card['word']}' sau: {'; '.join(trace_cache[key])}. "
                 "Thẻ vẫn được tạo không có âm thanh.",
             )
-        by_word[card["word"].casefold()] = card["audio"]
     for reverse in reverse_cards:
-        reverse["audio"] = lookup(reverse["answer"]) or by_word.get(reverse["word"].casefold())
+        reverse["audio"] = cache.get(reverse["answer"].casefold()) or by_word.get(reverse["word"].casefold())
         if reverse["audio"] is None:
             msg(
                 "Cảnh báo",
@@ -499,6 +463,10 @@ def validate_cards(data: dict) -> list[dict]:
             raise RuntimeError("AI trả về thẻ thiếu dữ liệu. Chưa thêm thẻ vào Anki.")
         if not isinstance(card["synonyms"], list):
             raise RuntimeError("AI trả về synonyms không hợp lệ. Chưa thêm thẻ vào Anki.")
+    for card in cards:
+        parts = str(card["part_of_speech"]).split("/")
+        if any(part not in PARTS_OF_SPEECH for part in parts) or len(set(parts)) != len(parts):
+            raise RuntimeError(f"AI trả về part_of_speech không hợp lệ cho '{card['word']}'. Chưa thêm thẻ vào Anki.")
     return cards
 
 
@@ -555,8 +523,8 @@ def next_excel_path(vocabulary_dir: Path) -> Path:
     vocabulary_dir.mkdir(exist_ok=True)
     prefix = datetime.now().strftime("%d%m%y")
     ids = []
-    for path in vocabulary_dir.glob(f"{prefix}-*.xlsx"):
-        match = re.fullmatch(rf"{prefix}-(\d{{2}})\.xlsx", path.name)
+    for path in vocabulary_dir.glob(f"{prefix}-*.*"):
+        match = re.fullmatch(rf"{prefix}-(\d{{2}})(?:-\d+words)?\.(?:xlsx|apkg)", path.name)
         if match:
             ids.append(int(match.group(1)))
     next_id = max(ids, default=0) + 1
@@ -642,6 +610,59 @@ def anki_note(deck: str, front: str, back: str, tags: list[str], audio: dict | N
     return note
 
 
+def create_apkg(cards: list[dict], reverse_cards: list[dict], deck_name: str, output: Path) -> Path:
+    deck_id = (int.from_bytes(hashlib.sha256(deck_name.encode("utf-8")).digest()[:4], "big") % (1 << 30)) + (1 << 30)
+    models = [
+        genanki.Model(
+            model_id,
+            name,
+            fields=[{"name": "Front"}, {"name": "Back"}],
+            templates=[{"name": "Card 1", "qfmt": "{{Front}}", "afmt": '{{FrontSide}}<hr id="answer">{{Back}}'}],
+        )
+        for model_id, name in ((1690123450, "Vocabulary Generator"), (1690123451, "Vocabulary Generator Reverse"))
+    ]
+    deck = genanki.Deck(deck_id, deck_name)
+    media = {}
+    for items, model, front_key, back_key, tag in (
+        (cards, models[0], "anki_front_html", "anki_back_html", "ai-vocab"),
+        (reverse_cards, models[1], "front", "back", "reverse"),
+    ):
+        for item in items:
+            audio = item.get("audio")
+            note = anki_note(
+                deck_name,
+                item[front_key],
+                item[back_key],
+                ["ai-vocab", tag] if tag == "reverse" else [tag],
+                audio,
+                "Front",
+            )
+            deck.add_note(genanki.Note(
+                model=model,
+                fields=[note["fields"]["Front"], note["fields"]["Back"]],
+                tags=note["tags"],
+                guid=genanki.guid_for(tag, item["word"].casefold()),
+            ))
+            if audio:
+                audio_path = Path(audio["path"])
+                if not audio_path.is_file():
+                    raise RuntimeError(f"Không tìm thấy file audio tạm: {audio_path.name}")
+                media[audio["filename"]] = audio_path
+    package = genanki.Package(deck, media_files=[str(path) for path in media.values()])
+    package.write_to_file(str(output))
+    return output
+
+
+def import_apkg(path: Path, deck: str, config: dict) -> None:
+    if not path.is_file():
+        raise RuntimeError(f"Không tìm thấy gói Anki: {path.name}")
+    check_anki(config)
+    anki("createDeck", {"deck": deck}, config)
+    enable_anki_autoplay(deck, config)
+    if anki("importPackage", {"path": path.resolve().as_posix()}, config) is not True:
+        raise RuntimeError(f"Anki không nhập được gói: {path.name}")
+
+
 def enable_anki_autoplay(deck: str, config: dict) -> None:
     try:
         deck_config = anki("getDeckConfig", {"deck": deck}, config)
@@ -656,53 +677,6 @@ def enable_anki_autoplay(deck: str, config: dict) -> None:
         raise RuntimeError(
             "Không thể bật tự động phát audio trong Anki. Hãy kiểm tra AnkiConnect rồi chạy lại."
         ) from exc
-
-
-def store_audio_files(cards: list[dict], reverse_cards: list[dict], config: dict) -> None:
-    stored: set[str] = set()
-    for item in [*cards, *reverse_cards]:
-        audio = item.get("audio")
-        if not audio or audio["filename"] in stored:
-            continue
-        path = Path(audio.get("path", ""))
-        if not path.is_file():
-            raise RuntimeError(f"Không tìm thấy file audio tạm: {path.name or audio['filename']}")
-        result = anki(
-            "storeMediaFile",
-            {
-                "filename": audio["filename"],
-                "path": str(path),
-                "deleteExisting": True,
-            },
-            config,
-        )
-        if not result:
-            raise RuntimeError(f"Anki không lưu được audio: {audio['filename']}")
-        stored.add(audio["filename"])
-
-
-def add_to_anki(cards: list[dict], reverse_cards: list[dict], config: dict) -> int:
-    anki("version", None, config)
-    deck = config["deck_name"]
-    anki("createDeck", {"deck": deck}, config)
-    enable_anki_autoplay(deck, config)
-    store_audio_files(cards, reverse_cards, config)
-    normal_notes = [
-        anki_note(deck, card["anki_front_html"], card["anki_back_html"], ["ai-vocab"], card.get("audio"), "Front")
-        for card in shuffled(cards)
-    ]
-    reverse_notes = [
-        anki_note(deck, reverse["front"], reverse["back"], ["ai-vocab", "reverse"], reverse.get("audio"), "Back")
-        for reverse in shuffled(reverse_cards)
-    ]
-    notes = []
-    for batch in (normal_notes, reverse_notes):
-        allowed = anki("canAddNotes", {"notes": batch}, config)
-        notes.extend(note for note, ok in zip(batch, allowed) if ok)
-    if not notes:
-        raise RuntimeError("Không có thẻ mới để thêm vào Anki. Có thể các thẻ này đã tồn tại.")
-    result = anki("addNotes", {"notes": notes}, config)
-    return len([note_id for note_id in result if note_id])
 
 
 def check_anki(config: dict) -> None:
@@ -735,16 +709,21 @@ def generate_and_add(
             all_reverse_cards.extend(gemini_reverse_cards(batch, reverse_prompt, config))
     with tempfile.TemporaryDirectory(prefix="anki-deck-audio-") as temp_dir:
         audio_dir = Path(temp_dir)
-        with timed_step("Lấy audio phát âm từ DictionaryAPI"):
+        with timed_step("Lấy audio phát âm từ Wiktionary và Google TTS"):
             enrich_audio(all_cards, all_reverse_cards, audio_dir)
         with timed_step("Tạo file Excel"):
             excel_path = write_excel(root, all_cards, all_reverse_cards)
         msg("OK", f"File Excel: {excel_path.relative_to(root)}")
-        add_config = {**config, "deck_name": deck_name} if deck_name else config
-        with timed_step("Thêm thẻ và audio vào Anki"):
-            added = add_to_anki(all_cards, all_reverse_cards, add_config)
-    msg("OK", f"Đã thêm {added} thẻ vào Anki.")
-    return added
+        target_deck = deck_name or config["deck_name"]
+        apkg_path = excel_path.with_name(f"{excel_path.stem}-{len(all_cards)}words.apkg")
+        with timed_step("Đóng gói thẻ và audio thành APKG"):
+            create_apkg(all_cards, all_reverse_cards, target_deck, apkg_path)
+        msg("OK", f"File APKG: {apkg_path.relative_to(root)}")
+        with timed_step("Nhập gói vào Anki qua AnkiConnect"):
+            import_apkg(apkg_path, target_deck, config)
+    note_count = len(all_cards) + len(all_reverse_cards)
+    msg("OK", f"Đã nhập gói gồm {note_count} ghi chú vào Anki.")
+    return note_count
 
 
 def run_self_test() -> None:
@@ -770,6 +749,15 @@ def run_self_test() -> None:
     }
     cards = validate_cards(sample)
     assert cards[0]["word"] == "combination"
+    invalid_pos = copy(sample)
+    invalid_pos["cards"] = [dict(cards[0], part_of_speech="noun")]
+    try:
+        validate_cards(invalid_pos)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("Unsupported part-of-speech labels must be rejected.")
+    assert is_mp3(b"ID3sample") and is_mp3(b"\xff\xfb\x90") and not is_mp3(b"error 404")
     assert sorted(shuffled(["a", "b", "c"])) == ["a", "b", "c"]
     assert is_busy_ai_error(RuntimeError("Gọi API thất bại (503): overloaded"))
     assert is_busy_ai_error(RuntimeError("Không thể kết nối tới dịch vụ: timed out"))
@@ -800,24 +788,14 @@ def run_self_test() -> None:
     assert reverse[0]["keyword"] == "combination (n)"
     assert reverse[0]["answer"] == "combination"
     assert "___" in reverse[0]["front"]
-    audio = select_audio([
-        {"phonetics": [
-            {"audio": "", "text": "/x/"},
-            {"audio": "//api.dictionaryapi.dev/media/word-uk.mp3"},
-            {
-                "audio": "https://api.dictionaryapi.dev/media/word-us.mp3",
-                "sourceUrl": "https://commons.wikimedia.org/example",
-                "license": {"name": "CC BY", "url": "https://creativecommons.org/licenses/by/4.0/"},
-            },
-        ]}
-    ])
-    assert audio and audio["url"].endswith("-us.mp3")
+    audio = audio_metadata("https://example.com/audio.mp3")
+    assert audio and audio["url"].endswith("audio.mp3")
     assert audio["filename"].startswith("vocab_") and audio["filename"].endswith(".mp3")
     assert set(audio) == {"url", "filename"}
     assert audio_metadata("https://example.com/audio") ["filename"].endswith(".mp3")
     assert audio_metadata("https://example.com/audio.ogg") is None
     assert audio_metadata("https://example.com/audio.wav") is None
-    assert select_audio([{"phonetics": [{"audio": "http://example.com/unsafe.mp3"}]}]) is None
+    assert audio_metadata("http://example.com/unsafe.mp3") is None
     wiktionary = wiktionary_audio_from_html(
         '<h2 id="French">French</h2><source src="//example.com/french.mp3" type="audio/mpeg">'
         '<h2 id="English">English</h2><source src="//upload.wikimedia.org/english.mp3" type="audio/mpeg">'
@@ -874,6 +852,52 @@ def run_self_test() -> None:
     assert "audio" not in anki_note("Deck", "front", "back", [], None, "Front")
     original_anki = globals()["anki"]
     actions = []
+
+    with tempfile.TemporaryDirectory() as package_temp:
+        audio_path = Path(package_temp) / "sample.mp3"
+        audio_path.write_bytes(b"ID3sample")
+        packaged_cards = [{**cards[0], "audio": {"filename": "sample.mp3", "path": str(audio_path)}}]
+        packaged_reverse = [{**reverse[0], "audio": {"filename": "sample.mp3", "path": str(audio_path)}}]
+        apkg_path = create_apkg(packaged_cards, packaged_reverse, "Deck", Path(package_temp) / "deck.apkg")
+        with zipfile.ZipFile(apkg_path) as package_file:
+            media = json.loads(package_file.read("media"))
+            assert "collection.anki2" in package_file.namelist()
+            assert len(media) == 1 and package_file.read(next(iter(media))) == b"ID3sample"
+            collection_path = Path(package_temp) / "collection.anki2"
+            collection_path.write_bytes(package_file.read("collection.anki2"))
+        collection = sqlite3.connect(collection_path)
+        try:
+            assert collection.execute("select count(*) from notes").fetchone()[0] == 2
+        finally:
+            collection.close()
+
+        fail_import = False
+        def fake_import(action, params, config):
+            actions.append((action, params))
+            if action == "version":
+                return 6
+            if action == "getDeckConfig":
+                return {"autoplay": True}
+            if action == "importPackage":
+                assert params["path"] == apkg_path.resolve().as_posix()
+                return not fail_import
+
+        globals()["anki"] = fake_import
+        try:
+            import_apkg(apkg_path, "Deck", {})
+            fail_import = True
+            try:
+                import_apkg(apkg_path, "Deck", {})
+            except RuntimeError:
+                assert apkg_path.is_file()
+            else:
+                raise AssertionError("Failed package imports must retain the APKG for manual import.")
+        finally:
+            globals()["anki"] = original_anki
+    assert [action for action, _ in actions] == [
+        "version", "createDeck", "getDeckConfig", "importPackage",
+        "version", "createDeck", "getDeckConfig", "importPackage",
+    ]
 
     def fake_anki(action, params, config):
         actions.append((action, params))
@@ -972,12 +996,20 @@ def run_diagnostics(root: Path) -> int:
     check("Mẫu Excel", valid_template)
     check("Đọc cấu hình", lambda: f"model={load_config(root)['model']} (khóa API đã được ẩn)")
     check("Đọc file input", lambda: f"{len(read_words(root / 'input'))} từ/cụm từ")
-    check(
-        "DictionaryAPI",
-        lambda: "kết nối và audio hoạt động"
-        if dictionary_audio("hello")
-        else (_ for _ in ()).throw(RuntimeError("không tìm thấy audio thử")),
-    )
+    def check_audio_sources() -> str:
+        with tempfile.TemporaryDirectory() as audio_temp:
+            trace: list[str] = []
+            audio = resolve_audio(
+                "hello",
+                (wiktionary_audio, google_tts_audio),
+                trace,
+                prepare=lambda item: {**item, "path": str(download_audio(item, Path(audio_temp)))},
+            )
+            if not audio:
+                raise RuntimeError("; ".join(trace))
+            return f"đã tải audio ({trace[-1]})"
+
+    check("Audio Wiktionary / Google TTS", check_audio_sources)
 
     def writable() -> str:
         folder = root / "vocabulary"
@@ -1047,8 +1079,6 @@ def main() -> int:
             words = shuffled(read_words(root / "input"))
             prompt = (src_dir(root) / "agent-prompt.md").read_text(encoding="utf-8")
             reverse_prompt = (src_dir(root) / "reverse-prompt.md").read_text(encoding="utf-8")
-        with timed_step("Kiểm tra Anki và AnkiConnect"):
-            check_anki(config)
         generate_and_add(root, config, words, prompt, reverse_prompt)
         return 0
     except (RuntimeError, HTTPError) as exc:
