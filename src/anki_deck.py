@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextvars import ContextVar, copy_context
 import html
 import hashlib
 import json
@@ -104,19 +105,22 @@ def src_dir(root: Path) -> Path:
     return root / "src"
 
 
+progress_sink: ContextVar = ContextVar("progress_sink", default=None)
+_active_step: ContextVar = ContextVar("active_step", default=None)
+
+
 def msg(kind: str, text: str) -> None:
-    print(f"[{kind:<9}] {text}", flush=True)
-
-
-_active_step: tuple[str, float] | None = None
+    line = f"[{kind:<9}] {text}"
+    print(line, flush=True)
+    sink = progress_sink.get()
+    if sink:
+        sink(line)
 
 
 @contextmanager
 def timed_step(text: str):
-    global _active_step
     started = time.perf_counter()
-    previous = _active_step
-    _active_step = (text, started)
+    token = _active_step.set((text, started))
     msg("Đang chạy", text)
     try:
         yield
@@ -126,12 +130,12 @@ def timed_step(text: str):
     else:
         msg("OK", f"Hoàn thành trong {time.perf_counter() - started:.1f} giây.")
     finally:
-        _active_step = previous
+        _active_step.reset(token)
 
 
 def log_step_progress() -> None:
-    if _active_step:
-        text, started = _active_step
+    if _active_step.get():
+        text, started = _active_step.get()
         msg("Đang chạy", f"{text} ({time.perf_counter() - started:.1f}s)")
 
 
@@ -361,7 +365,8 @@ def enrich_audio(cards: list[dict], reverse_cards: list[dict], audio_dir: Path |
     # ponytail: cap audio requests at 8 concurrent words to limit service load.
     for start in range(0, len(unique_terms), 8):
         with ThreadPoolExecutor(max_workers=8) as executor:
-            cache.update(executor.map(fetch, unique_terms[start:start + 8]))
+            futures = [executor.submit(copy_context().run, fetch, item) for item in unique_terms[start:start + 8]]
+            cache.update(future.result() for future in futures)
 
     by_word = {card["word"].casefold(): cache.get(card["word"].casefold()) for card in cards}
     for card in cards:
@@ -635,7 +640,7 @@ def create_apkg(cards: list[dict], reverse_cards: list[dict], deck_name: str, ou
                 item[back_key],
                 ["ai-vocab", tag] if tag == "reverse" else [tag],
                 audio,
-                "Front",
+                "Back" if tag == "reverse" else "Front",
             )
             deck.add_note(genanki.Note(
                 model=model,
@@ -689,14 +694,19 @@ def check_anki(config: dict) -> None:
         ) from exc
 
 
-def generate_and_add(
-    root: Path,
-    config: dict,
-    words: list[str],
-    prompt: str,
-    reverse_prompt: str,
-    deck_name: str | None = None,
-) -> int:
+def generate_package(root: Path, config: dict, words: list[str], output: Path) -> Path:
+    prompt = (src_dir(root) / "agent-prompt.md").read_text(encoding="utf-8")
+    reverse_prompt = (src_dir(root) / "reverse-prompt.md").read_text(encoding="utf-8")
+    cards, reverse_cards = generate_cards(words, prompt, reverse_prompt, config)
+    with tempfile.TemporaryDirectory(prefix="anki-deck-audio-") as temp_dir:
+        with timed_step("Lấy audio phát âm từ Wiktionary và Google TTS"):
+            enrich_audio(cards, reverse_cards, Path(temp_dir))
+        with timed_step("Đóng gói thẻ và audio thành APKG"):
+            create_apkg(cards, reverse_cards, config["deck_name"], output)
+    return output
+
+
+def generate_cards(words: list[str], prompt: str, reverse_prompt: str, config: dict) -> tuple[list[dict], list[dict]]:
     all_cards: list[dict] = []
     word_batches = chunks(words, int(config["chunk_size"]))
     for index, batch in enumerate(word_batches, start=1):
@@ -707,6 +717,18 @@ def generate_and_add(
     for index, batch in enumerate(reverse_batches, start=1):
         with timed_step(f"Dùng AI tạo thẻ luyện tập, đợt {index}/{len(reverse_batches)} ({len(batch)} từ)"):
             all_reverse_cards.extend(gemini_reverse_cards(batch, reverse_prompt, config))
+    return all_cards, all_reverse_cards
+
+
+def generate_and_add(
+    root: Path,
+    config: dict,
+    words: list[str],
+    prompt: str,
+    reverse_prompt: str,
+    deck_name: str | None = None,
+) -> int:
+    all_cards, all_reverse_cards = generate_cards(words, prompt, reverse_prompt, config)
     with tempfile.TemporaryDirectory(prefix="anki-deck-audio-") as temp_dir:
         audio_dir = Path(temp_dir)
         with timed_step("Lấy audio phát âm từ Wiktionary và Google TTS"):
