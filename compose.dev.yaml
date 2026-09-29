@@ -4,7 +4,7 @@ services:
       context: .
       network: host
     ports:
-      - "127.0.0.1:12000:8000"
+      - "12000:12000"
     environment:
       GEMINI_API_KEY: ${GEMINI_API_KEY:?Set GEMINI_API_KEY in .env}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.1-flash-lite}
