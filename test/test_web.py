@@ -84,6 +84,7 @@ class WebFlow(unittest.TestCase):
             self.assertTrue(any("Lấy audio" in item.get("text", "") for item in events))
             result = self.client.get(f"/api/jobs/{job_id}/download")
             self.assertEqual(result.content, b"sample package")
+            self.assertRegex(result.headers["content-disposition"], r'filename="\d{6}-\d{6}-2_words\.apkg"')
             self.assertEqual(self.client.get(f"/api/jobs/{job_id}/download").status_code, 404)
             self.assertEqual(len(list((self.data / "history").glob("*.apkg"))), 1)
             with (self.data / "history" / "conversions.csv").open(encoding="utf-8", newline="") as file:

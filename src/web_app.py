@@ -11,7 +11,7 @@ import os
 import secrets
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -133,7 +133,7 @@ def progress(job: dict, line: str):
 def convert(job_id: str, words: list[str]):
     job = jobs[job_id]
     token = progress_sink.set(lambda line: progress(job, line))
-    output = DATA / "history" / f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{job_id}.apkg"
+    output = DATA / "history" / job["filename"]
     try:
         key = os.environ["GEMINI_API_KEY"]
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -181,11 +181,18 @@ def start(data: Input, session: str | None = Cookie(default=None)):
     user = current_user(session)
     words = vocabulary(data.text)
     job_id = uuid4().hex
+    started = datetime.now()
     with lock:
         for old_id in [key for key, value in jobs.items() if value["created"] + 3600 < time.time()]:
             del jobs[old_id]
-        jobs[job_id] = {"user": user, "created": time.time(), "condition": threading.Condition(),
-                        "events": [], "percent": 5, "file": None, "downloaded": False}
+        filenames = {job["filename"] for job in jobs.values()}
+        filename = f"{started:%d%m%y-%H%M%S}-{len(words)}_words.apkg"
+        while filename in filenames or (DATA / "history" / filename).exists():
+            started += timedelta(seconds=1)
+            filename = f"{started:%d%m%y-%H%M%S}-{len(words)}_words.apkg"
+        jobs[job_id] = {"user": user, "created": time.time(), "filename": filename,
+                        "condition": threading.Condition(), "events": [], "percent": 5,
+                        "file": None, "downloaded": False}
     threading.Thread(target=convert, args=(job_id, words), daemon=True).start()
     return {"id": job_id}
 
