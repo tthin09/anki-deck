@@ -1,6 +1,8 @@
 services:
   web:
-    build: .
+    build:
+      context: .
+      network: host
     ports:
       - "127.0.0.1:11000:8000"
     environment:
