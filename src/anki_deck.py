@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextvars import ContextVar, copy_context
 import hashlib
 import html
+from html.parser import HTMLParser
 import json
 import random
 import re
@@ -92,10 +93,52 @@ def src_dir(root: Path) -> Path:
 
 
 progress_sink: ContextVar = ContextVar("progress_sink", default=None)
+cancellation_check: ContextVar = ContextVar("cancellation_check", default=lambda: None)
 _active_step: ContextVar = ContextVar("active_step", default=None)
 
 
+class ConversionCancelled(Exception):
+    pass
+
+
+def check_cancelled() -> None:
+    cancellation_check.get()()
+
+
+class CardHTML(HTMLParser):
+    """Keep prompt-supported formatting, never AI-supplied active content."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.output = []
+        self.blocked = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"script", "style", "iframe", "object", "template"}:
+            self.blocked.append(tag)
+        elif not self.blocked and tag in {"br", "i", "b"}:
+            self.output.append(f"<{tag}>")
+
+    def handle_endtag(self, tag):
+        if self.blocked:
+            if tag == self.blocked[-1]:
+                self.blocked.pop()
+        elif tag in {"i", "b"}:
+            self.output.append(f"</{tag}>")
+
+    def handle_data(self, data):
+        if not self.blocked:
+            self.output.append(html.escape(data, quote=False))
+
+
+def sanitize_card_html(value: str) -> str:
+    parser = CardHTML()
+    parser.feed(value)
+    parser.close()
+    return "".join(parser.output)
+
+
 def msg(kind: str, text: str) -> None:
+    check_cancelled()
     line = f"[{kind:<9}] {text}"
     print(line, flush=True)
     sink = progress_sink.get()
@@ -130,11 +173,14 @@ def chunks(items: list[str], size: int) -> list[list[str]]:
 
 
 def post_json(url: str, payload: dict, headers: dict | None = None, timeout: int = 60) -> dict:
+    check_cancelled()
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = Request(url, data=data, headers={"Content-Type": "application/json", **(headers or {})})
     try:
         with urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+            result = json.loads(response.read().decode("utf-8"))
+            check_cancelled()
+            return result
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"Gọi API thất bại ({exc.code}): {body[:500]}") from exc
@@ -165,10 +211,12 @@ def download_audio(
     sleep=time.sleep,
     opener=None,
 ) -> Path:
+    check_cancelled()
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / audio["filename"]
     request = Request(audio["url"], headers={"User-Agent": "anki-deck/1.0 (audio download)"})
     for attempt in range(AUDIO_DOWNLOAD_RETRIES):
+        check_cancelled()
         try:
             with (opener or urlopen)(request, timeout=30) as response:
                 data = response.read(AUDIO_DOWNLOAD_MAX_BYTES + 1)
@@ -178,6 +226,7 @@ def download_audio(
                     raise RuntimeError("audio vượt quá giới hạn 10 MB")
                 if not is_mp3(data):
                     raise RuntimeError("Nguồn audio trả về dữ liệu không phải file MP3.")
+                check_cancelled()
                 path.write_bytes(data)
                 return path
         except HTTPError as exc:
@@ -213,6 +262,7 @@ def wiktionary_audio_from_html(page: str) -> dict | None:
 
 
 def wiktionary_audio(text: str) -> dict | None:
+    check_cancelled()
     url = f"https://en.wiktionary.org/w/rest.php/v1/page/{quote(text, safe='')}/html"
     try:
         with urlopen(Request(url, headers={"User-Agent": "anki-deck/1.0 (audio lookup)"}), timeout=20) as response:
@@ -236,6 +286,7 @@ def resolve_audio(
     prepare=None,
 ) -> dict | None:
     for source in sources or (wiktionary_audio, google_tts_audio):
+        check_cancelled()
         name = {
             "wiktionary_audio": "Wiktionary",
             "google_tts_audio": "Google TTS",
@@ -369,6 +420,7 @@ def gemini_json(items: list[dict | str], prompt: str, schema: dict, config: dict
     }
     last_error = None
     for attempt in range(4):
+        check_cancelled()
         try:
             response = post_json(url, payload, timeout=30)
             break
@@ -450,13 +502,13 @@ def make_reverse_note(card: dict, reverse: dict) -> dict:
     answer = answer_text(reverse["sentence"])
     front = re.sub(
         r"<str>.*?</str>",
-        f"{blank_for(answer)} ({reverse['vietnamese_hint']})",
+        lambda _: f"{blank_for(answer)} ({reverse['vietnamese_hint']})",
         reverse["sentence"],
         count=1,
         flags=re.IGNORECASE | re.DOTALL,
     )
     keyword = f"{answer} ({card['part_of_speech']})"
-    return {"front": front, "back": keyword, "keyword": keyword, "word": card["word"], "answer": answer}
+    return {"front": html.escape(front), "back": html.escape(keyword), "keyword": keyword, "word": card["word"], "answer": answer}
 
 
 def validate_reverse_cards(cards: list[dict], data: dict) -> list[dict]:
@@ -479,7 +531,7 @@ def validate_reverse_cards(cards: list[dict], data: dict) -> list[dict]:
 
 
 def package_note(front: str, back: str, tags: list[str], audio: dict | None, audio_field: str) -> dict:
-    fields = {"Front": front, "Back": back}
+    fields = {"Front": sanitize_card_html(front), "Back": sanitize_card_html(back)}
     if audio:
         fields[audio_field] += f"[sound:{audio['filename']}]" + AUDIO_BUTTON_STYLE
     return {"fields": fields, "tags": tags}
@@ -498,11 +550,13 @@ def create_apkg(cards: list[dict], reverse_cards: list[dict], deck_name: str, ou
     ]
     deck = genanki.Deck(deck_id, deck_name)
     media = {}
+    check_cancelled()
     for items, model, front_key, back_key, tag in (
         (cards, models[0], "anki_front_html", "anki_back_html", "ai-vocab"),
         (reverse_cards, models[1], "front", "back", "reverse"),
     ):
         for item in items:
+            check_cancelled()
             audio = item.get("audio")
             note = package_note(
                 item[front_key],
@@ -523,7 +577,9 @@ def create_apkg(cards: list[dict], reverse_cards: list[dict], deck_name: str, ou
                     raise RuntimeError(f"Không tìm thấy file audio tạm: {audio_path.name}")
                 media[audio["filename"]] = audio_path
     package = genanki.Package(deck, media_files=[str(path) for path in media.values()])
+    check_cancelled()
     package.write_to_file(str(output))
+    check_cancelled()
     return output
 
 

@@ -23,3 +23,4 @@ jobs:
         run: |
           npm --prefix web ci
           npm --prefix web run build
+          node test/test_frontend.mjs

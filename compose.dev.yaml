@@ -1,5 +1,6 @@
 services:
   web:
+    user: "${ANKI_UID:-10001}:${ANKI_GID:-10001}"
     build:
       context: .
       network: host

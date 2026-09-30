@@ -1,4 +1,5 @@
 """Local, network-free checks of the web conversion boundary."""
+import asyncio
 import csv
 import json
 import os
@@ -6,6 +7,7 @@ import sqlite3
 import zipfile
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -31,6 +33,8 @@ class WebFlow(unittest.TestCase):
         with web.lock:
             web.sessions.clear()
             web.jobs.clear()
+            web.workers.clear()
+            web.pending.clear()
         self.client = TestClient(web.app)
         self.addCleanup(self.client.close)
 
@@ -49,8 +53,8 @@ class WebFlow(unittest.TestCase):
         hundred = "\n".join(f"word{i}" for i in range(100))
         self.assertEqual(self.client.post("/api/preview", json={"text": hundred}).json()["count"], 100)
         self.assertEqual(self.client.post("/api/jobs", json={"text": hundred + "\nword100"}).status_code, 422)
-        self.assertEqual(self.client.post("/api/jobs", json={"text": "x" * 32001}).status_code, 422)
-        self.assertEqual(self.client.post("/api/preview", json={"text": "😀" * 8100}).status_code, 422)
+        self.assertEqual(self.client.post("/api/jobs", json={"text": "x" * 32001}).status_code, 413)
+        self.assertEqual(self.client.post("/api/preview", json={"text": "😀" * 8100}).status_code, 413)
         self.assertEqual(self.client.post("/api/logout").status_code, 200)
         self.assertEqual(self.client.get("/api/me").status_code, 401)
 
@@ -98,15 +102,129 @@ class WebFlow(unittest.TestCase):
         self.login()
         def fake_generate(root, config, words, output):
             output.write_bytes(words[0].encode())
-        with patch.dict(os.environ, {"GEMINI_API_KEY": "secret"}), patch.object(web, "generate_package", fake_generate):
-            ids = [self.client.post("/api/jobs", json={"text": word}).json()["id"] for word in ("apple", "book")]
-            for job_id in ids:
-                with self.client.stream("GET", f"/api/jobs/{job_id}/events") as response:
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "secret"}), patch.object(web, "generate_package", fake_generate), TestClient(web.app) as bob:
+            bob.post("/api/login", json={"username": "bob", "password": "other"})
+            clients = (self.client, bob)
+            ids = [client.post("/api/jobs", json={"text": word}).json()["id"] for client, word in zip(clients, ("apple", "book"))]
+            for client, job_id in zip(clients, ids):
+                with client.stream("GET", f"/api/jobs/{job_id}/events") as response:
                     self.assertIn('"type": "done"', "".join(response.iter_text()))
-            self.assertEqual([self.client.get(f"/api/jobs/{job_id}/download").content for job_id in ids], [b"apple", b"book"])
+            self.assertEqual([client.get(f"/api/jobs/{job_id}/download").content for client, job_id in zip(clients, ids)], [b"apple", b"book"])
         self.assertEqual(len(list((self.data / "history").glob("*.apkg"))), 2)
         with (self.data / "history" / "conversions.csv").open(encoding="utf-8", newline="") as file:
             self.assertEqual(len(list(csv.DictReader(file))), 2)
+
+    def test_body_limit_and_single_word_rules(self):
+        self.login()
+        body = json.dumps({"text": "apple"}).encode()
+        allowed = body + b" " * (8191 - len(body))
+        self.assertEqual(self.client.post("/api/preview", content=allowed, headers={"Content-Type": "application/json"}).status_code, 200)
+        for path in ("/api/preview", "/api/login", "/api/jobs", "/api/logout"):
+            self.assertEqual(self.client.post(path, content=allowed + b" ").status_code, 413)
+        for word in ("two words", "two\twords", "two\u00a0words", "x" * 51):
+            response = self.client.post("/api/preview", json={"text": "apple\n" + word})
+            self.assertEqual(response.status_code, 422)
+            self.assertIn("Line 2", response.json()["detail"])
+        response = self.client.post("/api/preview", json={"text": "  Apple  \n\nAPPLE\n" + "é" * 50})
+        self.assertEqual(response.json()["words"], ["Apple", "é" * 50])
+
+    def test_chunked_body_is_rejected_before_application(self):
+        async def exercise():
+            called, sent = [], []
+            async def application(scope, receive, send):
+                called.append(True)
+            chunks = iter([{"type": "http.request", "body": b"x" * 4096, "more_body": True},
+                           {"type": "http.request", "body": b"x" * 4096, "more_body": False}])
+            async def receive():
+                return next(chunks)
+            async def send(message):
+                sent.append(message)
+            await web.APIBodyLimit(application)({"type": "http", "path": "/api/jobs", "headers": []}, receive, send)
+            self.assertEqual(called, [])
+            self.assertEqual(sent[0]["status"], 413)
+        asyncio.run(exercise())
+
+    def test_cancel_waits_for_provider_and_keeps_only_latest_replacement(self):
+        self.login()
+        started, release, replacement_started = threading.Event(), threading.Event(), threading.Event()
+        calls = []
+        def fake_generate(root, config, words, output):
+            calls.append(words[0])
+            if words == ["first"]:
+                started.set()
+                if not release.wait(5):
+                    raise RuntimeError("test timed out")
+                generator.check_cancelled()
+            else:
+                replacement_started.set()
+                output.write_bytes(words[0].encode())
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "secret"}), patch.object(web, "generate_package", fake_generate):
+            try:
+                first = self.client.post("/api/jobs", json={"text": "first"}).json()["id"]
+                self.assertTrue(started.wait(2))
+                response = self.client.post("/api/jobs", json={"text": "duplicate"})
+                self.assertEqual(response.status_code, 409)
+                self.assertIn("already running", response.json()["detail"])
+                with TestClient(web.app) as bob:
+                    bob.post("/api/login", json={"username": "bob", "password": "other"})
+                    self.assertEqual(bob.post(f"/api/jobs/{first}/cancel").status_code, 404)
+                    self.assertEqual(bob.post(f"/api/jobs/{first}/heartbeat").status_code, 404)
+                self.assertEqual(self.client.post(f"/api/jobs/{first}/cancel").status_code, 200)
+                second = self.client.post("/api/jobs", json={"text": "second"}).json()["id"]
+                self.assertEqual(self.client.post("/api/jobs", json={"text": "duplicate"}).status_code, 409)
+                self.client.post(f"/api/jobs/{second}/cancel")
+                third = self.client.post("/api/jobs", json={"text": "third"}).json()["id"]
+                self.assertEqual(calls, ["first"])
+                release.set()
+                self.assertTrue(replacement_started.wait(2))
+                with self.client.stream("GET", f"/api/jobs/{third}/events") as response:
+                    self.assertIn('"type": "done"', "".join(response.iter_text()))
+                self.assertEqual(calls, ["first", "third"])
+                for job_id in (first, second):
+                    self.assertEqual(self.client.get(f"/api/jobs/{job_id}/download").status_code, 404)
+                self.assertEqual(self.client.get(f"/api/jobs/{third}/download").content, b"third")
+                self.assertEqual(len(list((self.data / "history").glob("*.apkg"))), 1)
+                self.assertEqual(list((self.data / "history").glob("*.part")), [])
+            finally:
+                release.set()
+
+    def test_missing_heartbeat_cancels_and_cannot_be_revived(self):
+        self.login()
+        started, release = threading.Event(), threading.Event()
+        def fake_generate(root, config, words, output):
+            started.set()
+            release.wait(5)
+            generator.check_cancelled()
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "secret"}), patch.object(web, "generate_package", fake_generate):
+            try:
+                job_id = self.client.post("/api/jobs", json={"text": "apple"}).json()["id"]
+                self.assertTrue(started.wait(2))
+                self.assertEqual(self.client.post(f"/api/jobs/{job_id}/heartbeat").json()["state"], "running")
+                now = time.monotonic()
+                with patch.object(web.time, "monotonic", return_value=now + 31):
+                    web.expire_job(web.jobs[job_id])  # Fire the lease callback without a 30-second test sleep.
+                    self.assertEqual(self.client.post(f"/api/jobs/{job_id}/heartbeat").json()["state"], "cancelled")
+                self.assertEqual(self.client.post(f"/api/jobs/{job_id}/heartbeat").json()["state"], "cancelled")
+                self.assertEqual(self.client.get(f"/api/jobs/{job_id}/download").status_code, 404)
+            finally:
+                release.set()
+                deadline = time.monotonic() + 2
+                while web.workers and time.monotonic() < deadline:
+                    time.sleep(.01)
+
+    def test_deck_html_allowlist_and_plain_text_reverse_fields(self):
+        malicious = '<b onclick="bad()">word</b><br/><i style="color:red">meaning</i><img src="https://evil"><script>bad()</script><iframe>bad()</iframe>'
+        note = generator.package_note(malicious, 'A & B', [], {"filename": "safe.mp3"}, "Front")
+        self.assertTrue(note["fields"]["Front"].startswith('<b>word</b><br><i>meaning</i>'))
+        self.assertNotIn("bad", note["fields"]["Front"])
+        self.assertNotIn("https://evil", note["fields"]["Front"])
+        self.assertIn("[sound:safe.mp3]", note["fields"]["Front"])
+        self.assertEqual(note["fields"]["Back"], "A &amp; B")
+        reverse = generator.make_reverse_note({"word": "apple", "part_of_speech": "n"},
+            {"sentence": '<b>I ate</b> <str>apple</str>.', "vietnamese_hint": '<script>bad()</script>'})
+        self.assertNotIn("<script>", reverse["front"])
+        self.assertNotIn("<b>", reverse["front"])
+        self.assertIn("&lt;b&gt;", reverse["front"])
 
     def test_audio_rate_limits_retry_with_smaller_batches(self):
         original = generator.wiktionary_audio
