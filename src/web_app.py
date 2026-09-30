@@ -12,6 +12,7 @@ import secrets
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from uuid import uuid4
 
@@ -181,7 +182,7 @@ def start(data: Input, session: str | None = Cookie(default=None)):
     user = current_user(session)
     words = vocabulary(data.text)
     job_id = uuid4().hex
-    started = datetime.now()
+    started = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh"))
     with lock:
         for old_id in [key for key, value in jobs.items() if value["created"] + 3600 < time.time()]:
             del jobs[old_id]
