@@ -25,27 +25,19 @@ class WebFlow(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.data = Path(self.temp.name)
-        (self.data / "accounts.json").write_text(json.dumps({"alice": web.hash_password("correct"),
-                                                       "bob": web.hash_password("other")}), encoding="utf-8")
         self.data_patch = patch.object(web, "DATA", self.data)
         self.data_patch.start()
         self.addCleanup(self.data_patch.stop)
         with web.lock:
-            web.sessions.clear()
             web.jobs.clear()
             web.workers.clear()
             web.pending.clear()
         self.client = TestClient(web.app)
         self.addCleanup(self.client.close)
 
-    def login(self, username="alice", password="correct"):
-        return self.client.post("/api/login", json={"username": username, "password": password})
-
-    def test_auth_preview_and_limits(self):
-        self.assertEqual(self.client.post("/api/preview", json={"text": "apple"}).status_code, 401)
-        self.assertEqual(self.login(password="wrong").status_code, 401)
-        self.assertEqual(self.login().json(), {"username": "alice"})
-        self.assertNotIn("correct", str(self.client.get("/api/me").json()))
+    def test_anonymous_browser_id_preview_and_limits(self):
+        self.assertEqual(self.client.post("/api/login", json={}).status_code, 405)
+        self.assertEqual(len(self.client.post("/api/preview", json={"text": "apple"}).cookies["session"]), 43)
         self.assertEqual(self.client.post("/api/preview", json={"text": " Apple \nbook\napple\n\nStraße\nSTRASSE"}).json(),
                          {"count": 3, "words": ["Apple", "book", "Straße"]})
         self.assertEqual(self.client.post("/api/jobs", json={"text": "  "}).status_code, 422)
@@ -55,11 +47,8 @@ class WebFlow(unittest.TestCase):
         self.assertEqual(self.client.post("/api/jobs", json={"text": hundred + "\nword100"}).status_code, 422)
         self.assertEqual(self.client.post("/api/jobs", json={"text": "x" * 32001}).status_code, 413)
         self.assertEqual(self.client.post("/api/preview", json={"text": "😀" * 8100}).status_code, 413)
-        self.assertEqual(self.client.post("/api/logout").status_code, 200)
-        self.assertEqual(self.client.get("/api/me").status_code, 401)
 
     def test_conversion_history_progress_ownership_and_one_download(self):
-        self.login()
         def fake_generate(root, config, words, output):
             self.assertEqual(words, ["Apple", "book"])
             web.msg("Đang chạy", "Dùng AI tạo thẻ từ vựng")
@@ -72,10 +61,9 @@ class WebFlow(unittest.TestCase):
             job = self.client.post("/api/jobs", json={"text": "Apple\nbook\napple"})
             self.assertEqual(job.status_code, 202)
             job_id = job.json()["id"]
-            # Other users cannot observe events or download another user's package.
+            # Other browsers cannot observe events or download this browser's package.
             bob = TestClient(web.app)
             try:
-                bob.post("/api/login", json={"username": "bob", "password": "other"})
                 self.assertEqual(bob.get(f"/api/jobs/{job_id}/events").status_code, 404)
                 self.assertEqual(bob.get(f"/api/jobs/{job_id}/download").status_code, 404)
             finally:
@@ -94,16 +82,14 @@ class WebFlow(unittest.TestCase):
             with (self.data / "history" / "conversions.csv").open(encoding="utf-8", newline="") as file:
                 rows = list(csv.DictReader(file))
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["uploader"], "alice")
+            self.assertEqual(rows[0]["uploader"], self.client.cookies["session"])
             self.assertEqual(json.loads(rows[0]["words"]), ["Apple", "book"])
             self.assertEqual(rows[0]["filename"], result.headers["content-disposition"].split('filename="')[1].split('"')[0])
 
     def test_parallel_conversions_keep_distinct_packages_and_csv_rows(self):
-        self.login()
         def fake_generate(root, config, words, output):
             output.write_bytes(words[0].encode())
         with patch.dict(os.environ, {"GEMINI_API_KEY": "secret"}), patch.object(web, "generate_package", fake_generate), TestClient(web.app) as bob:
-            bob.post("/api/login", json={"username": "bob", "password": "other"})
             clients = (self.client, bob)
             ids = [client.post("/api/jobs", json={"text": word}).json()["id"] for client, word in zip(clients, ("apple", "book"))]
             for client, job_id in zip(clients, ids):
@@ -115,11 +101,10 @@ class WebFlow(unittest.TestCase):
             self.assertEqual(len(list(csv.DictReader(file))), 2)
 
     def test_body_limit_and_single_word_rules(self):
-        self.login()
         body = json.dumps({"text": "apple"}).encode()
         allowed = body + b" " * (8191 - len(body))
         self.assertEqual(self.client.post("/api/preview", content=allowed, headers={"Content-Type": "application/json"}).status_code, 200)
-        for path in ("/api/preview", "/api/login", "/api/jobs", "/api/logout"):
+        for path in ("/api/preview", "/api/jobs"):
             self.assertEqual(self.client.post(path, content=allowed + b" ").status_code, 413)
         for word in ("two words", "two\twords", "two\u00a0words", "x" * 51):
             response = self.client.post("/api/preview", json={"text": "apple\n" + word})
@@ -145,7 +130,6 @@ class WebFlow(unittest.TestCase):
         asyncio.run(exercise())
 
     def test_cancel_waits_for_provider_and_keeps_only_latest_replacement(self):
-        self.login()
         started, release, replacement_started = threading.Event(), threading.Event(), threading.Event()
         calls = []
         def fake_generate(root, config, words, output):
@@ -166,7 +150,6 @@ class WebFlow(unittest.TestCase):
                 self.assertEqual(response.status_code, 409)
                 self.assertIn("already running", response.json()["detail"])
                 with TestClient(web.app) as bob:
-                    bob.post("/api/login", json={"username": "bob", "password": "other"})
                     self.assertEqual(bob.post(f"/api/jobs/{first}/cancel").status_code, 404)
                     self.assertEqual(bob.post(f"/api/jobs/{first}/heartbeat").status_code, 404)
                 self.assertEqual(self.client.post(f"/api/jobs/{first}/cancel").status_code, 200)
@@ -189,7 +172,6 @@ class WebFlow(unittest.TestCase):
                 release.set()
 
     def test_missing_heartbeat_cancels_and_cannot_be_revived(self):
-        self.login()
         started, release = threading.Event(), threading.Event()
         def fake_generate(root, config, words, output):
             started.set()
@@ -277,7 +259,6 @@ class WebFlow(unittest.TestCase):
                 database.close()
 
     def test_failed_conversion_does_not_log_or_archive(self):
-        self.login()
         def fail(*args):
             raise RuntimeError("secret provider failure")
         with patch.dict(os.environ, {"GEMINI_API_KEY": "secret"}), patch.object(web, "generate_package", fail):

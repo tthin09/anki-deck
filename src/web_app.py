@@ -1,11 +1,7 @@
 """Local web adapter for the vocabulary-to-APKG generator."""
 from __future__ import annotations
 
-import argparse
 import csv
-import getpass
-import hashlib
-import hmac
 import json
 import os
 import secrets
@@ -25,8 +21,7 @@ from anki_deck import ConversionCancelled, cancellation_check, generate_package,
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.environ.get("ANKI_DATA_DIR", str(ROOT / "data")))
-SESSION_AGE = 8 * 60 * 60
-sessions: dict[str, tuple[str, float]] = {}
+CLIENT_AGE = 365 * 24 * 60 * 60
 jobs: dict[str, dict] = {}
 workers: dict[str, dict] = {}
 pending: dict[str, dict] = {}
@@ -69,20 +64,6 @@ class APIBodyLimit:
 app.add_middleware(APIBodyLimit)
 
 
-def hash_password(password: str) -> str:
-    salt = secrets.token_bytes(16)
-    key = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 600_000)
-    return f"{salt.hex()}:{key.hex()}"
-
-
-def verify_password(password: str, stored: str) -> bool:
-    try:
-        salt, expected = (bytes.fromhex(part) for part in stored.split(":"))
-        return hmac.compare_digest(hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 600_000), expected)
-    except (ValueError, TypeError):
-        return False
-
-
 def vocabulary(text: str, enforce_limit: bool = True) -> list[str]:
     if len(text.encode("utf-8")) >= 8192:
         raise HTTPException(422, "Input is too large")
@@ -104,21 +85,17 @@ def vocabulary(text: str, enforce_limit: bool = True) -> list[str]:
     return words
 
 
-class Login(BaseModel):
-    username: str
-    password: str
-
-
 class Input(BaseModel):
     text: str = Field(max_length=8191)
 
 
-def current_user(session: str | None = Cookie(default=None)) -> str:
-    with lock:
-        entry = sessions.get(session or "")
-        if not entry or entry[1] <= time.time():
-            raise HTTPException(401, "Login required")
-        return entry[0]
+def current_user(response: Response, session: str | None = Cookie(default=None)) -> str:
+    """Anonymous per-browser id; it only keeps one browser's jobs and downloads away from another's."""
+    if session and len(session) == 43:
+        return session
+    session = secrets.token_urlsafe(32)
+    response.set_cookie("session", session, httponly=True, samesite="strict", max_age=CLIENT_AGE, path="/")
+    return session
 
 
 def job_for(job_id: str, user: str) -> dict:
@@ -127,37 +104,6 @@ def job_for(job_id: str, user: str) -> dict:
         if not job or job["user"] != user or job["created"] + 3600 < time.time():
             raise HTTPException(404, "Conversion not found")
         return job
-
-
-@app.post("/api/login")
-def login(credentials: Login, response: Response):
-    try:
-        accounts = json.loads((DATA / "accounts.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        raise HTTPException(503, "Accounts not configured")
-    if not isinstance(accounts, dict):
-        raise HTTPException(503, "Accounts not configured")
-    stored = accounts.get(credentials.username)
-    if not isinstance(stored, str) or not verify_password(credentials.password, stored):
-        raise HTTPException(401, "Invalid credentials")
-    token = secrets.token_urlsafe(32)
-    with lock:
-        sessions[token] = (credentials.username, time.time() + SESSION_AGE)
-    response.set_cookie("session", token, httponly=True, samesite="strict", max_age=SESSION_AGE, path="/")
-    return {"username": credentials.username}
-
-
-@app.get("/api/me")
-def me(session: str | None = Cookie(default=None)):
-    return {"username": current_user(session)}
-
-
-@app.post("/api/logout")
-def logout(response: Response, session: str | None = Cookie(default=None)):
-    with lock:
-        sessions.pop(session or "", None)
-    response.delete_cookie("session", path="/")
-    return {"ok": True}
 
 
 def progress(job: dict, line: str):
@@ -220,6 +166,7 @@ def convert(job: dict):
         key = os.environ["GEMINI_API_KEY"]
         output.parent.mkdir(parents=True, exist_ok=True)
         config = {"gemini_api_key": key, "model": os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite"),
+                  "llm_base_url": os.environ.get("LLM_BASE_URL", "http://localhost:8000"),
                   "deck_name": "English Vocabulary", "chunk_size": 30}
         check_job(job)
         generate_package(ROOT, config, words, temporary)
@@ -284,8 +231,8 @@ def run_user(job: dict):
 
 
 @app.post("/api/preview")
-def preview(data: Input, session: str | None = Cookie(default=None)):
-    current_user(session)
+def preview(data: Input, response: Response, session: str | None = Cookie(default=None)):
+    current_user(response, session)
     try:
         words = vocabulary(data.text, enforce_limit=False)
     except HTTPException as exc:
@@ -297,8 +244,8 @@ def preview(data: Input, session: str | None = Cookie(default=None)):
 
 
 @app.post("/api/jobs", status_code=202)
-def start(data: Input, session: str | None = Cookie(default=None)):
-    user = current_user(session)
+def start(data: Input, response: Response, session: str | None = Cookie(default=None)):
+    user = current_user(response, session)
     words = vocabulary(data.text)
     job_id = uuid4().hex
     started = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh"))
@@ -333,16 +280,16 @@ def start(data: Input, session: str | None = Cookie(default=None)):
 
 
 @app.post("/api/jobs/{job_id}/cancel")
-def cancel(job_id: str, session: str | None = Cookie(default=None)):
-    job = job_for(job_id, current_user(session))
+def cancel(job_id: str, response: Response, session: str | None = Cookie(default=None)):
+    job = job_for(job_id, current_user(response, session))
     with lock:
         finish(job, "cancelled")
     return {"ok": True}
 
 
 @app.post("/api/jobs/{job_id}/heartbeat")
-def heartbeat(job_id: str, session: str | None = Cookie(default=None)):
-    job = job_for(job_id, current_user(session))
+def heartbeat(job_id: str, response: Response, session: str | None = Cookie(default=None)):
+    job = job_for(job_id, current_user(response, session))
     with lock:
         if job["state"] not in {"done", "failed", "cancelled"}:
             if cancelled(job):
@@ -353,8 +300,8 @@ def heartbeat(job_id: str, session: str | None = Cookie(default=None)):
 
 
 @app.get("/api/jobs/{job_id}/events")
-def events(job_id: str, session: str | None = Cookie(default=None)):
-    job = job_for(job_id, current_user(session))
+def events(job_id: str, response: Response, session: str | None = Cookie(default=None)):
+    job = job_for(job_id, current_user(response, session))
 
     def stream():
         index = 0
@@ -375,8 +322,8 @@ def events(job_id: str, session: str | None = Cookie(default=None)):
 
 
 @app.get("/api/jobs/{job_id}/download")
-def download(job_id: str, session: str | None = Cookie(default=None)):
-    job = job_for(job_id, current_user(session))
+def download(job_id: str, response: Response, session: str | None = Cookie(default=None)):
+    job = job_for(job_id, current_user(response, session))
     with lock:
         if not job["file"] or job["downloaded"]:
             raise HTTPException(404, "Package unavailable")
@@ -394,11 +341,3 @@ def frontend(path: str):
     if not (DIST / "index.html").is_file():
         raise HTTPException(503, "Build the frontend first")
     return FileResponse(DIST / "index.html")
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--hash-password", action="store_true", help="Prompt for a password and print its hash")
-    args = parser.parse_args()
-    if args.hash_password:
-        print(hash_password(getpass.getpass("Password: ")))

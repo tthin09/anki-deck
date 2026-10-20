@@ -22,7 +22,7 @@ async function page() {
     navigator: { sendBeacon: url => { calls.push(['beacon', url]); return true } },
     fetch: async (url, options = {}) => {
       calls.push([options.method ?? 'GET', url])
-      const data = url === '/api/me' ? { username: 'alice' } : url === '/api/jobs' ? { id: `job${++nextJob}` } : url.endsWith('/heartbeat') ? { state: 'running' } : { ok: true }
+      const data = url === '/api/jobs' ? { id: `job${++nextJob}` } : url.endsWith('/heartbeat') ? { state: 'running' } : { ok: true }
       return { ok: true, json: async () => data }
     },
     EventSource: class {

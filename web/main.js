@@ -32,22 +32,8 @@ async function api(url, options = {}) {
   return response
 }
 
-function showLogin(error = '') {
-  app.innerHTML = `<main class="login"><h1>Vocabulary Deck Generator</h1><form id="login"><label>Username<input name="username" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button>Log in</button><p role="alert" id="error"></p></form></main>`
-  document.querySelector('#error').textContent = error
-  document.querySelector('#login').onsubmit = async event => {
-    event.preventDefault()
-    const form = new FormData(event.target)
-    try {
-      const response = await api('/api/login', { method: 'POST', body: JSON.stringify(Object.fromEntries(form)) })
-      showEditor((await response.json()).username)
-    } catch (err) { document.querySelector('#error').textContent = err.message }
-  }
-}
-
-function showEditor(user) {
-  app.innerHTML = `<header><h1>Vocabulary Deck Generator</h1><div><span id="user"></span> <button id="logout" class="secondary">Log out</button></div></header><main><div class="layout"><section><h2>Vocabulary editor</h2><p>One word per line, without spaces (maximum 50 characters). Drop a UTF-8 .txt file here to replace the text.</p><textarea id="editor" aria-label="Vocabulary words" placeholder="apple\nbook\ncat"></textarea></section><div class="actions"><button id="convert" disabled>Convert →</button></div><section><h2>Preview</h2><p><strong id="count">0</strong> / 100 words</p><p id="preview" aria-live="polite">Enter vocabulary to begin.</p><p role="alert" id="error"></p></section></div><section class="status"><h2>Progress</h2><progress id="progress" value="0" max="100"></progress><pre id="log" aria-live="polite"></pre></section></main>`
-  document.querySelector('#user').textContent = user
+function showEditor() {
+  app.innerHTML = `<header><h1>Vocabulary Deck Generator</h1></header><main><div class="layout"><section><h2>Vocabulary editor</h2><p>One word per line, without spaces (maximum 50 characters). Drop a UTF-8 .txt file here to replace the text.</p><textarea id="editor" aria-label="Vocabulary words" placeholder="apple\nbook\ncat"></textarea></section><div class="actions"><button id="convert" disabled>Convert →</button></div><section><h2>Preview</h2><p><strong id="count">0</strong> / 100 words</p><p id="preview" aria-live="polite">Enter vocabulary to begin.</p><p role="alert" id="error"></p></section></div><section class="status"><h2>Progress</h2><progress id="progress" value="0" max="100"></progress><pre id="log" aria-live="polite"></pre></section></main>`
   const editor = document.querySelector('#editor'), convert = document.querySelector('#convert')
   const error = document.querySelector('#error'), log = document.querySelector('#log'), bar = document.querySelector('#progress')
   let busy = false, count = 0, revision = 0, timer
@@ -79,12 +65,6 @@ function showEditor(user) {
       editor.value = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer())
       update()
     } catch { error.textContent = 'File must be UTF-8' }
-  }
-  document.querySelector('#logout').onclick = async () => {
-    if (activeJob) await api(`/api/jobs/${activeJob}/cancel`, { method: 'POST' }).catch(() => {})
-    stopTracking()
-    await api('/api/logout', { method: 'POST' })
-    showLogin()
   }
   convert.onclick = async () => {
     busy = true; convert.disabled = true; bar.value = 5; log.textContent = ''; error.textContent = ''
@@ -148,4 +128,4 @@ function showEditor(user) {
   update()
 }
 
-api('/api/me').then(r => r.json()).then(data => showEditor(data.username)).catch(() => showLogin())
+showEditor()
