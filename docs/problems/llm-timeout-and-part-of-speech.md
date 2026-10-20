@@ -1,0 +1,50 @@
+# LLM problems: timeouts and wrong part of speech
+
+Status: open, under discussion. No fix chosen yet.
+
+## 1. LLM request sometimes fails or times out for the user
+
+### Symptom
+A conversion sometimes hangs, then fails with an error.
+
+### How the call works now (`src/anki_deck.py`)
+- `gemini_json` sends one request per batch of 30 words (`chunk_size: 30` in `src/web_app.py`).
+- The timeout is 30 s per request (`post_json(url, payload, timeout=30)`).
+- Timeouts and 429/5xx responses are retried 4 times in total, with 2/4/6 s sleeps.
+- Each conversion makes two passes over the words, one for cards and one for reverse cards.
+
+### Likely causes
+- **30 s is short for 30 cards of structured JSON.** A slow response times out, gets retried, and can time out again. In the worst case one batch takes about 4 × 30 s + 12 s ≈ 2 min 12 s before it fails.
+- **Quota or rate limit (429) on `GEMINI_API_KEY`.** The 2–6 s backoff is too short to wait out a per-minute limit.
+- **No partial progress.** If any batch fails, the whole conversion is thrown away.
+
+### Fix options
+1. Raise the timeout to 90–120 s. One line.
+2. Lower `chunk_size` (for example to 10–15). Requests get faster, but there are more of them.
+3. Back off longer on 429, honouring `Retry-After` the way the audio download already does.
+4. Log which error actually happens (timeout, 429 or 5xx) before choosing among 1–3.
+
+### Open questions
+- Does "token doesn't work" mean a timeout, or an API key or quota error (401/403/429)? An exact error message or a server log line would settle it.
+- Does it happen more with long word lists?
+
+## 2. Part of speech is wrong for about 30% of words
+
+### Symptom
+The part of speech doesn't match how the word is used. For example, "like" is used as a verb in the sentence but is labelled `(n)`. Sometimes the label is completely wrong.
+
+### Likely causes
+- **Field order in `CARD_SCHEMA`.** `part_of_speech` comes before `example_sentence`, so the model commits to the part of speech before it writes the sentence. The prompt (`src/agent-prompt.md`) asks it to choose the part of speech from the sentence, but the generation order makes that impossible.
+- **Reverse cards reuse the card's part of speech.** `make_reverse_note` builds `keyword = f"{answer} ({card['part_of_speech']})"`, but the reverse prompt writes a *new* sentence, where the word may play a different role.
+- **Weak model and large batches.** The default model is `gemini-3.1-flash-lite` with 30 words per call.
+- **No consistency check.** `validate_cards` only checks that the tag is in the allowed set, not that it matches the sentence.
+
+### Fix options
+1. Move `example_sentence` (and `vietnamese_meaning`) before `part_of_speech` in the schema. The model then writes the sentence first and labels it afterwards.
+2. Have the reverse-card pass return its own part of speech for its sentence, instead of copying the card's.
+3. Use a stronger model (via `GEMINI_MODEL`) or smaller batches.
+4. Collect 20–30 wrong examples first to measure the error rate before and after a fix.
+
+### Open questions
+- Is the wrong label on the main card, on the reverse (fill-in-the-blank) card, or on both?
+- Is the input a single word, or a word inside the user's own sentence?
