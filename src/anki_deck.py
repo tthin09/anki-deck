@@ -112,7 +112,7 @@ AUDIO_BUTTON_STYLE = "<style>.replay-button{display:block!important;text-align:c
 AUDIO_DOWNLOAD_RETRIES = 3
 AUDIO_DOWNLOAD_MAX_BYTES = 10 * 1024 * 1024
 AUDIO_DOWNLOAD_RETRY_CODES = {429, 500, 502, 503, 504}
-PARTS_OF_SPEECH = {"n", "v", "adj", "adv", "np", "vp", "adjp", "advp", "s"}
+PARTS_OF_SPEECH = {"n", "v", "adj", "adv", "prep", "conj", "pron", "det", "np", "vp", "adjp", "advp", "s"}
 
 
 def src_dir(root: Path) -> Path:

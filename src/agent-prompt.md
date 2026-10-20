@@ -23,7 +23,7 @@ with this exact shape:
 
 Rules:
 - Keep the original word or phrase in "word".
-- Use part of speech abbreviations only: n, v, adj, adv, np, vp, adjp, advp, s.
+- Use part of speech abbreviations only: n, v, adj, adv, prep, conj, pron, det, np, vp, adjp, advp, s.
 - If a word has multiple common parts of speech, use slash format such as "n/v".
 - Write the example sentence and Vietnamese meaning first, then choose the part of speech from how the word functions in that example sentence. Check that the example, Vietnamese meaning, word_forms, and part_of_speech agree. For words commonly used as both a noun and a verb, include both only when both meanings are presented; do not guess from the spelling alone.
 - Use natural Vietnamese meanings for Vietnamese learners.

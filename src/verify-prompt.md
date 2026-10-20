@@ -24,7 +24,7 @@ Steps for each pair:
    "example_sentence", and in the practice "sentence" (the answer inside
    <str></str>). Then say what is wrong, or "OK" if nothing is.
 2. The card's "part_of_speech" must match how the word functions in its
-   "example_sentence". Use only: n, v, adj, adv, np, vp, adjp, advp, s. Use a
+   "example_sentence". Use only: n, v, adj, adv, prep, conj, pron, det, np, vp, adjp, advp, s. Use a
    slash form such as "n/v" only when the card really presents both meanings.
 3. "vietnamese_meaning", "word_forms" and "anki_front_html" must agree with
    that part of speech and example. The part of speech shown in

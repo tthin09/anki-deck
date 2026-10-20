@@ -412,6 +412,15 @@ class CardGeneration(unittest.TestCase):
         _, practice, _ = self.generate(llm)
         self.assertEqual(practice[0]["back"], "liked (v)")
 
+    def test_prepositions_are_a_valid_part_of_speech(self):
+        llm = FakeLLM()
+        llm.cards = {**CARD, "word": "within", "part_of_speech": "prep", "example_sentence": "Stay within the lines.",
+                     "anki_front_html": "within (prep)"}
+        llm.practice = {**PRACTICE, "word": "within", "part_of_speech": "prep", "sentence": "Reply <str>within</str> a day."}
+        llm.verify = lambda round_number: ["skip"]
+        cards, practice, _ = self.generate(llm)
+        self.assertEqual(practice[0]["back"], "within (prep)")
+
     def test_practice_card_with_a_part_of_speech_outside_the_card_is_rejected(self):
         llm = FakeLLM()
         llm.practice = {**PRACTICE, "part_of_speech": "n"}
