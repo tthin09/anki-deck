@@ -33,10 +33,22 @@ async function api(url, options = {}) {
 }
 
 function showEditor() {
-  app.innerHTML = `<header><h1>Vocabulary Deck Generator</h1></header><main><div class="layout"><section><h2>Vocabulary editor</h2><p>One word per line, without spaces (maximum 50 characters). Drop a UTF-8 .txt file here to replace the text.</p><textarea id="editor" aria-label="Vocabulary words" placeholder="apple\nbook\ncat"></textarea></section><div class="actions"><button id="convert" disabled>Convert →</button></div><section><h2>Preview</h2><p><strong id="count">0</strong> / 100 words</p><p id="preview" aria-live="polite">Enter vocabulary to begin.</p><p role="alert" id="error"></p></section></div><section class="status"><h2>Progress</h2><progress id="progress" value="0" max="100"></progress><pre id="log" aria-live="polite"></pre></section></main>`
+  app.innerHTML = `<div class="page"><aside class="rail"><h1>Vocabulary<br>Deck Generator</h1><label for="editor">Your words</label><textarea id="editor" spellcheck="false" aria-describedby="hint" placeholder="apple\nbook\ncat"></textarea><p class="hint" id="hint">Paste a list, comma-separated words or spreadsheet rows. Max 100. Drop a .txt file to replace.</p><button id="convert" disabled>Convert →</button><p role="alert" id="error"></p></aside><main class="table"><div class="meta"><span class="count"><b id="count">0</b> cards</span><span class="cap">of 100</span><progress id="progress" value="0" max="100" aria-label="Conversion progress"></progress></div><div id="preview" class="cards" aria-live="polite"></div><details class="build-log"><summary>Build log</summary><pre id="log" aria-live="polite"></pre></details></main></div>`
   const editor = document.querySelector('#editor'), convert = document.querySelector('#convert')
-  const error = document.querySelector('#error'), log = document.querySelector('#log'), bar = document.querySelector('#progress')
+  const error = document.querySelector('#error'), log = document.querySelector('#log'), bar = document.querySelector('#progress'), preview = document.querySelector('#preview')
   let busy = false, count = 0, revision = 0, timer
+  // Each word becomes a card; --i/--n let the CSS light cards up as progress reaches them.
+  const showCards = words => {
+    preview.replaceChildren(...words.map((word, i) => {
+      const card = document.createElement('div')
+      card.className = 'card'
+      card.textContent = word
+      card.style.setProperty('--i', i)
+      card.style.setProperty('--r', `${(word.length * 7) % 9 - 4}deg`)
+      return card
+    }))
+    preview.style.setProperty('--n', words.length)
+  }
   const update = (message = '') => {
     convert.disabled = true
     const current = ++revision
@@ -48,10 +60,16 @@ function showEditor() {
         if (current !== revision) return
         count = result.count
         document.querySelector('#count').textContent = count
-        document.querySelector('#preview').textContent = result.words.length ? result.words.join(', ') : 'Enter vocabulary to begin.'
-        error.textContent = count > 100 ? 'Maximum 100 unique words' : message
-        convert.disabled = busy || !count || count > 100
-      } catch (err) { if (current === revision) { count = 0; error.textContent = err.message } }
+        showCards(result.words)
+        error.textContent = result.error || (count > 100 ? 'Maximum 100 unique words' : message)
+        convert.disabled = busy || !count || count > 100 || !!result.error
+      } catch (err) {
+        if (current !== revision) return
+        count = 0
+        document.querySelector('#count').textContent = 0
+        showCards([])
+        error.textContent = err.message
+      }
     }, 180)
   }
   editor.oninput = () => update()
@@ -67,11 +85,13 @@ function showEditor() {
     } catch { error.textContent = 'File must be UTF-8' }
   }
   convert.onclick = async () => {
-    busy = true; convert.disabled = true; bar.value = 5; log.textContent = ''; error.textContent = ''
+    busy = true; app.dataset.busy = true; editor.readOnly = true; document.querySelector('.build-log').open = true; app.style.setProperty('--p', 5); convert.disabled = true; bar.value = 5; log.textContent = ''; error.textContent = ''
     convert.textContent = 'Converting…'
     const finish = message => {
       stopTracking()
       busy = false
+      app.dataset.busy = false
+      editor.readOnly = false
       convert.textContent = 'Convert →'
       error.textContent = message
       update(message)
@@ -100,6 +120,7 @@ function showEditor() {
         if (activeJob !== id) return
         const status = JSON.parse(event.data)
         bar.value = status.percent ?? bar.value
+        app.style.setProperty('--p', bar.value)
         if (status.type === 'line') { log.textContent += `${status.text}\n`; log.scrollTop = log.scrollHeight }
         if (status.type === 'failed') finish('Conversion failed. Try again.')
         if (status.type === 'cancelled') finish('Conversion cancelled. You can try again.')

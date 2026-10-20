@@ -39,7 +39,7 @@ class WebFlow(unittest.TestCase):
         self.assertEqual(self.client.post("/api/login", json={}).status_code, 405)
         self.assertEqual(len(self.client.post("/api/preview", json={"text": "apple"}).cookies["session"]), 43)
         self.assertEqual(self.client.post("/api/preview", json={"text": " Apple \nbook\napple\n\nStraße\nSTRASSE"}).json(),
-                         {"count": 3, "words": ["Apple", "book", "Straße"]})
+                         {"count": 3, "words": ["Apple", "book", "Straße"], "error": ""})
         self.assertEqual(self.client.post("/api/jobs", json={"text": "  "}).status_code, 422)
         self.assertEqual(self.client.post("/api/preview", json={"text": "\n"}).json()["count"], 0)
         hundred = "\n".join(f"word{i}" for i in range(100))
@@ -106,12 +106,30 @@ class WebFlow(unittest.TestCase):
         self.assertEqual(self.client.post("/api/preview", content=allowed, headers={"Content-Type": "application/json"}).status_code, 200)
         for path in ("/api/preview", "/api/jobs"):
             self.assertEqual(self.client.post(path, content=allowed + b" ").status_code, 413)
-        for word in ("two words", "two\twords", "two\u00a0words", "x" * 51):
-            response = self.client.post("/api/preview", json={"text": "apple\n" + word})
+        for word in ("two words", "two\u00a0words", "x" * 51):
+            # Preview keeps the valid words and names the bad line; conversion refuses the whole input.
+            preview = self.client.post("/api/preview", json={"text": "apple\n" + word}).json()
+            self.assertEqual(preview["words"], ["apple"])
+            self.assertIn("Line 2", preview["error"])
+            response = self.client.post("/api/jobs", json={"text": "apple\n" + word})
             self.assertEqual(response.status_code, 422)
             self.assertIn("Line 2", response.json()["detail"])
         response = self.client.post("/api/preview", json={"text": "  Apple  \n\nAPPLE\n" + "é" * 50})
         self.assertEqual(response.json()["words"], ["Apple", "é" * 50])
+
+    def test_pasted_lists(self):
+        pastes = {
+            # Rows copied from the vocabulary spreadsheets, with and without the header row.
+            "No\tWord\tPart of Speech\tVietnamese Meaning\r\n1\tAdvocate\tv/n\tủng hộ, biện hộ\r\n2\tCognitive\tadj\tnhận thức\r\n": ["Advocate", "Cognitive"],
+            "1\tAdvocate\tv/n\tủng hộ, biện hộ\n2.0\tCognitive\tadj": ["Advocate", "Cognitive"],
+            "apple\tquả táo\nbook\tsách": ["apple", "book"],
+            "\napple\nNo\tWord\tPart of Speech\n1\tAdvocate\tv/n": ["apple", "Advocate"],
+            "1\tword\tn\n2\tbook\tn": ["word", "book"],
+            "apple, book; cat,\ndog": ["apple", "book", "cat", "dog"],
+            "• apple\n- book\n3. cat\n4) dog": ["apple", "book", "cat", "dog"],
+        }
+        for text, words in pastes.items():
+            self.assertEqual(self.client.post("/api/preview", json={"text": text}).json(), {"words": words, "count": len(words), "error": ""})
 
     def test_chunked_body_is_rejected_before_application(self):
         async def exercise():

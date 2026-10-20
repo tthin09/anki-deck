@@ -11,7 +11,7 @@ const tick = () => new Promise(resolve => setImmediate(resolve))
 async function page() {
   const elements = new Map(), handlers = {}, calls = [], streams = [], intervals = new Map()
   const element = key => {
-    if (!elements.has(key)) elements.set(key, { value: 'apple', textContent: '', disabled: false })
+    if (!elements.has(key)) elements.set(key, { value: 'apple', textContent: '', disabled: false, dataset: {}, style: { setProperty() {} }, replaceChildren() {} })
     return elements.get(key)
   }
   const context = {
@@ -22,7 +22,7 @@ async function page() {
     navigator: { sendBeacon: url => { calls.push(['beacon', url]); return true } },
     fetch: async (url, options = {}) => {
       calls.push([options.method ?? 'GET', url])
-      const data = url === '/api/jobs' ? { id: `job${++nextJob}` } : url.endsWith('/heartbeat') ? { state: 'running' } : { ok: true }
+      const data = url === '/api/preview' ? { words: ['apple'], count: 1, error: '' } : url === '/api/jobs' ? { id: `job${++nextJob}` } : url.endsWith('/heartbeat') ? { state: 'running' } : { ok: true }
       return { ok: true, json: async () => data }
     },
     EventSource: class {

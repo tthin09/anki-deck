@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -64,24 +65,56 @@ class APIBodyLimit:
 app.add_middleware(APIBodyLimit)
 
 
-def vocabulary(text: str, enforce_limit: bool = True) -> list[str]:
+LIST_MARKER = re.compile(r"^(?:[-*•·–]|\d+[.)])\s+")
+
+
+def parse(text: str) -> tuple[list[str], list[str]]:
+    """Unique words from pasted text, plus one error per bad line.
+
+    Accepts one word per line, comma/semicolon lists, bullet or numbered lists, and spreadsheet
+    rows (tab-separated: the "Word" column if a header names it, else the first non-number cell).
+    """
     if len(text.encode("utf-8")) >= 8192:
         raise HTTPException(422, "Input is too large")
+    lines = text.splitlines()
+    column = None
+    for index, line in enumerate(lines):
+        cells = [cell.strip().casefold() for cell in line.split("\t")]
+        # A header row names a "Word" column and has no row number.
+        if len(cells) > 1 and "word" in cells and not any(cell.replace(".", "").isdigit() for cell in cells):
+            column, lines[index] = cells.index("word"), ""
+            break
+        if line.strip() and "\t" in line:
+            break
     seen: set[str] = set()
-    words = []
-    for number, line in enumerate(text.splitlines(), 1):
-        word = line.strip()
-        if len(word) > 50:
-            raise HTTPException(422, f"Line {number}: a word must be at most 50 characters")
-        if any(char.isspace() for char in word):
-            raise HTTPException(422, f"Line {number}: enter one word without spaces or tabs")
-        if word and word.casefold() not in seen:
-            seen.add(word.casefold())
-            words.append(word)
-            if enforce_limit and len(words) > 100:
-                raise HTTPException(422, "Maximum 100 unique words")
+    words, errors = [], []
+    for number, line in enumerate(lines, 1):
+        if "\t" in line:
+            cells = [cell.strip() for cell in line.split("\t")]
+            if column is not None:
+                line = cells[column] if column < len(cells) else ""
+            else:
+                line = next((cell for cell in cells if cell and not cell.replace(".", "").isdigit()), "")
+        for item in re.split(r"[,;]", LIST_MARKER.sub("", line.strip())):
+            word = item.strip()
+            if len(word) > 50:
+                errors.append(f"Line {number}: a word must be at most 50 characters")
+            elif any(char.isspace() for char in word):
+                errors.append(f'Line {number}: "{word}" has spaces. Enter one word per line; phrases are not supported yet')
+            elif word and word.casefold() not in seen:
+                seen.add(word.casefold())
+                words.append(word)
+    return words, errors
+
+
+def vocabulary(text: str) -> list[str]:
+    words, errors = parse(text)
+    if errors:
+        raise HTTPException(422, errors[0])
     if not words:
         raise HTTPException(422, "Enter at least one word")
+    if len(words) > 100:
+        raise HTTPException(422, "Maximum 100 unique words")
     return words
 
 
@@ -235,14 +268,8 @@ def run_user(job: dict):
 @app.post("/api/preview")
 def preview(data: Input, response: Response, session: str | None = Cookie(default=None)):
     current_user(response, session)
-    try:
-        words = vocabulary(data.text, enforce_limit=False)
-    except HTTPException as exc:
-        if exc.detail == "Enter at least one word":
-            words = []
-        else:
-            raise
-    return {"words": words, "count": len(words)}
+    words, errors = parse(data.text)
+    return {"words": words, "count": len(words), "error": errors[0] if errors else ""}
 
 
 @app.post("/api/jobs", status_code=202)
