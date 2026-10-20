@@ -1,6 +1,8 @@
 src/config.json
 .env
 data/
+data-dev/
+output/
 web/node_modules/
 web/dist/
 lessons/

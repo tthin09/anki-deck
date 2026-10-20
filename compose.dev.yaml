@@ -1,3 +1,5 @@
+# own project name, so dev never replaces the production anki-deck stack
+name: anki-deck-dev
 services:
   web:
     user: "${ANKI_UID:-10001}:${ANKI_GID:-10001}"
@@ -13,5 +15,5 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - ./data:/data
+      - ./data-dev:/data
     restart: unless-stopped
