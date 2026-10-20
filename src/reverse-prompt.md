@@ -12,6 +12,7 @@ Return this exact shape:
     {
       "word": "advocate",
       "sentence": "She <str>advocates</str> taking a more active role in the project.",
+      "part_of_speech": "v",
       "vietnamese_hint": "ủng hộ"
     }
   ]
@@ -19,6 +20,9 @@ Return this exact shape:
 
 Rules:
 - Keep "word" exactly the same as the input word.
+- Use the word with the input "part_of_speech". If it lists several, such as "n/v",
+  use exactly one of them, and put only that one in "part_of_speech".
+- "part_of_speech" is how the answer inside <str></str> functions in your sentence.
 - The target answer must appear exactly once inside <str></str>.
 - The answer inside <str></str> may be a natural word form, not only the base word.
 - Randomly choose natural forms when appropriate:

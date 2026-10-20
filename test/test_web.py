@@ -203,7 +203,7 @@ class WebFlow(unittest.TestCase):
         self.assertIn("[sound:safe.mp3]", note["fields"]["Front"])
         self.assertEqual(note["fields"]["Back"], "A &amp; B")
         reverse = generator.make_reverse_note({"word": "apple", "part_of_speech": "n"},
-            {"sentence": '<b>I ate</b> <str>apple</str>.', "vietnamese_hint": '<script>bad()</script>'})
+            {"sentence": '<b>I ate</b> <str>apple</str>.', "part_of_speech": "n", "vietnamese_hint": '<script>bad()</script>'})
         self.assertNotIn("<script>", reverse["front"])
         self.assertNotIn("<b>", reverse["front"])
         self.assertIn("&lt;b&gt;", reverse["front"])
@@ -237,8 +237,7 @@ class WebFlow(unittest.TestCase):
 
         self.assertFalse(hasattr(generator, "import_apkg"))
         self.assertFalse(hasattr(generator, "anki"))
-        with patch.object(generator, "gemini_cards", return_value=[card]) as ai, \
-             patch.object(generator, "gemini_reverse_cards", return_value=[reverse]), \
+        with patch.object(generator, "generate_cards", return_value=([card], [reverse])) as ai, \
              patch.object(generator, "enrich_audio", side_effect=fake_audio):
             result = self.data / "apple.apkg"
             generator.generate_package(Path(__file__).resolve().parents[1],
@@ -270,6 +269,122 @@ class WebFlow(unittest.TestCase):
             self.assertEqual(self.client.get(f"/api/jobs/{job_id}/download").status_code, 404)
             self.assertFalse((self.data / "history" / "conversions.csv").exists())
             self.assertEqual(list((self.data / "history").glob("*.apkg")), [])
+
+
+CARD = {"word": "like", "example_sentence": "I like tea.", "vietnamese_meaning": "thích", "part_of_speech": "v",
+        "ipa": "/laɪk/", "word_forms": "liked (v)", "synonyms": ["enjoy"],
+        "anki_front_html": "like (v)", "anki_back_html": "thích"}
+PRACTICE = {"word": "like", "sentence": "They <str>liked</str> it.", "part_of_speech": "v", "vietnamese_hint": "thích"}
+
+
+class FakeResponse:
+    def __init__(self, body):
+        self.body = json.dumps(body).encode()
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        return False
+    def read(self):
+        return self.body
+
+
+class FakeLLM:
+    """Stands in for the local vLLM server and Gemini at the urlopen boundary."""
+    def __init__(self, local_down=False, verify=None):
+        self.local_down, self.calls, self.cards, self.practice = local_down, [], CARD, PRACTICE
+        self.verify = verify or (lambda round_number: {"pairs": [{"word": "like", "check": "ok", "card": CARD,
+                                                                  "practice_card": PRACTICE}]})
+
+    def __call__(self, request, timeout=None):
+        url = request.full_url
+        body = json.loads(request.data) if request.data else None
+        stage = None
+        if "generativelanguage" in url:
+            prompt = body["contents"][0]["parts"][0]["text"].split()[0]
+            stage = "gemini:" + {"Cards": "cards", "Practice": "practice_cards", "Verify": "verification"}[prompt]
+        elif self.local_down:
+            raise generator.URLError("connection refused")
+        elif url.endswith("/v1/models"):
+            return FakeResponse({"data": [{"id": "qwen-test"}]})
+        else:
+            stage = body["response_format"]["json_schema"]["name"]
+        self.calls.append(stage)
+        name = stage.split(":")[-1]
+        if name == "cards":
+            data = {"cards": [self.cards]}
+        elif name == "practice_cards":
+            data = {"cards": [self.practice]}
+        else:
+            data = self.verify(len([c for c in self.calls if c.endswith("verification")]))
+        text = json.dumps(data)
+        if stage.startswith("gemini"):
+            return FakeResponse({"candidates": [{"content": {"parts": [{"text": text}]}}]})
+        return FakeResponse({"choices": [{"message": {"content": text}}]})
+
+
+class CardGeneration(unittest.TestCase):
+    config = {"gemini_api_key": "fake", "model": "gemini-test", "llm_base_url": "http://llm:8000", "chunk_size": 30}
+
+    def generate(self, llm):
+        lines = []
+        token = generator.progress_sink.set(lines.append)
+        try:
+            with patch.object(generator, "urlopen", new=llm):
+                cards, practice = generator.generate_cards(["like"], "Cards prompt", "Practice prompt", "Verify prompt", self.config)
+        finally:
+            generator.progress_sink.reset(token)
+        return cards, practice, lines
+
+    def test_local_llm_down_falls_back_to_gemini(self):
+        llm = FakeLLM(local_down=True)
+        cards, practice, _ = self.generate(llm)
+        self.assertEqual(cards[0]["part_of_speech"], "v")
+        self.assertEqual(practice[0]["back"], "liked (v)")
+        self.assertIn("gemini:cards", llm.calls)
+
+    def test_verification_fixes_wrong_part_of_speech_and_stops_when_nothing_changes(self):
+        wrong = {**CARD, "part_of_speech": "n", "anki_front_html": "like (n)"}
+        llm = FakeLLM()
+        llm.cards = wrong
+        llm.practice = {**PRACTICE, "part_of_speech": "n", "sentence": "There is no <str>like</str> here."}
+        llm.verify = lambda round_number: {"pairs": [{"word": "like", "check": "like is a verb", "card": CARD,
+                                                     "practice_card": PRACTICE}]}
+        cards, practice, lines = self.generate(llm)
+        self.assertEqual(cards[0]["part_of_speech"], "v")
+        self.assertEqual(cards[0]["anki_front_html"], "like (v)")
+        self.assertEqual(practice[0]["back"], "liked (v)")
+        self.assertEqual(llm.calls.count("verification"), 2)
+        self.assertTrue(any("Đã sửa 1 thẻ" in line for line in lines))
+        self.assertTrue(any("Đã sửa 0 thẻ" in line for line in lines))
+
+    def test_verification_keeps_original_when_correction_is_invalid(self):
+        llm = FakeLLM()
+        llm.verify = lambda round_number: {"pairs": [{"word": "like", "check": "", "card": {**CARD, "part_of_speech": "verb"},
+                                                     "practice_card": PRACTICE}]}
+        cards, practice, _ = self.generate(llm)
+        self.assertEqual(cards[0]["part_of_speech"], "v")
+        self.assertEqual(llm.calls.count("verification"), 1)
+
+    def test_failed_verification_ships_unverified_cards_with_warning(self):
+        llm = FakeLLM()
+        llm.verify = lambda round_number: ["not", "pairs"]
+        cards, practice, lines = self.generate(llm)
+        self.assertEqual(practice[0]["back"], "liked (v)")
+        self.assertTrue(any("Cảnh báo" in line and "chưa kiểm tra" in line for line in lines))
+
+    def test_practice_card_shows_only_the_part_of_speech_it_uses(self):
+        llm = FakeLLM()
+        llm.cards = {**CARD, "part_of_speech": "n/v"}
+        llm.verify = lambda round_number: {"pairs": [{"word": "like", "check": "OK", "card": llm.cards,
+                                                     "practice_card": PRACTICE}]}
+        _, practice, _ = self.generate(llm)
+        self.assertEqual(practice[0]["back"], "liked (v)")
+
+    def test_practice_card_with_a_part_of_speech_outside_the_card_is_rejected(self):
+        llm = FakeLLM()
+        llm.practice = {**PRACTICE, "part_of_speech": "n"}
+        with self.assertRaisesRegex(RuntimeError, "sai từ loại"):
+            self.generate(llm)
 
 
 if __name__ == "__main__":
