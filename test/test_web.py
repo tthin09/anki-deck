@@ -354,8 +354,22 @@ class CardGeneration(unittest.TestCase):
         self.assertEqual(cards[0]["anki_front_html"], "like (v)")
         self.assertEqual(practice[0]["back"], "liked (v)")
         self.assertEqual(llm.calls.count("verification"), 2)
-        self.assertTrue(any("Đã sửa 1 thẻ" in line for line in lines))
-        self.assertTrue(any("Đã sửa 0 thẻ" in line for line in lines))
+        self.assertTrue(any("Vòng 1/2: đã sửa 1 thẻ" in line for line in lines))
+        self.assertTrue(any("Vòng 2/2: đã sửa 0 thẻ" in line for line in lines))
+
+    def test_invalid_local_answer_is_not_sent_to_gemini(self):
+        llm = FakeLLM()
+        llm.cards = {**CARD, "part_of_speech": "verb"}
+        with self.assertRaisesRegex(RuntimeError, "part_of_speech không hợp lệ"):
+            self.generate(llm)
+        self.assertEqual(llm.calls, ["cards"])
+
+    def test_verification_keeps_original_when_front_disagrees_with_fixed_part_of_speech(self):
+        llm = FakeLLM()
+        llm.verify = lambda round_number: {"pairs": [{"word": "LIKE", "check": "", "card": {**CARD, "part_of_speech": "n"},
+                                                     "practice_card": {**PRACTICE, "part_of_speech": "n"}}]}
+        cards, _, _ = self.generate(llm)
+        self.assertEqual(cards[0]["part_of_speech"], "v")
 
     def test_verification_keeps_original_when_correction_is_invalid(self):
         llm = FakeLLM()
@@ -370,7 +384,7 @@ class CardGeneration(unittest.TestCase):
         llm.verify = lambda round_number: ["not", "pairs"]
         cards, practice, lines = self.generate(llm)
         self.assertEqual(practice[0]["back"], "liked (v)")
-        self.assertTrue(any("Cảnh báo" in line and "chưa kiểm tra" in line for line in lines))
+        self.assertTrue(any("Cảnh báo" in line and "Không kiểm tra lại hết" in line for line in lines))
 
     def test_practice_card_shows_only_the_part_of_speech_it_uses(self):
         llm = FakeLLM()

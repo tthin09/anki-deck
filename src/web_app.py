@@ -110,6 +110,8 @@ def progress(job: dict, line: str):
     with job["condition"]:
         if "Dùng AI tạo thẻ luyện tập" in line:
             job["percent"] = 40
+        elif "Kiểm tra lại thẻ" in line:
+            job["percent"] = 55
         elif "Lấy audio" in line:
             job["percent"] = 65
         elif "Đóng gói" in line:

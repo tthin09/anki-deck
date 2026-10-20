@@ -582,8 +582,11 @@ def validate_practice_cards(cards: list[dict], data: dict) -> list[dict]:
 def verified_pair(card: dict, practice: dict, fix: dict | None) -> tuple[dict, dict]:
     """Take the verification's correction only if it is still a valid card pair for the same word."""
     try:
-        new_card = validate_cards({"cards": [fix["card"]]})[0]
-        if new_card["word"] != card["word"]:
+        new_card = {**validate_cards({"cards": [fix["card"]]})[0], "word": card["word"]}
+        if fix["card"]["word"].casefold() != card["word"].casefold():
+            return card, practice
+        # the front shows the part of speech too; a fix that relabels only one of them is rejected
+        if f"({new_card['part_of_speech']})" not in new_card["anki_front_html"]:
             return card, practice
         return new_card, validate_practice_cards([new_card], {"cards": [fix["practice_card"]]})[0]
     except (RuntimeError, KeyError, TypeError, AttributeError):
@@ -594,8 +597,8 @@ def verify_cards(cards: list[dict], practice: list[dict], prompt: str, config: d
     """Verification: let the AI correct card pairs in place, keeping the originals if it fails."""
     for round_number in range(1, VERIFICATION_ROUNDS + 1):
         changed = 0
-        with timed_step(f"Kiểm tra lại thẻ, vòng {round_number}/{VERIFICATION_ROUNDS}"):
-            try:
+        try:
+            with timed_step(f"Kiểm tra lại thẻ, vòng {round_number}/{VERIFICATION_ROUNDS}"):
                 for start in range(0, len(cards), VERIFICATION_CHUNK_SIZE):
                     indexes = range(start, min(start + VERIFICATION_CHUNK_SIZE, len(cards)))
                     items = [{"card": cards[i], "practice_card": practice[i]} for i in indexes]
@@ -609,10 +612,10 @@ def verify_cards(cards: list[dict], practice: list[dict], prompt: str, config: d
                         if pair != (cards[i], practice[i]):
                             cards[i], practice[i] = pair
                             changed += 1
-            except RuntimeError as exc:
-                msg("Cảnh báo", f"Không kiểm tra lại được thẻ, dùng thẻ chưa kiểm tra. Chi tiết: {exc}")
-                return
-            msg("OK", f"Đã sửa {changed} thẻ.")
+                msg("OK", f"Vòng {round_number}/{VERIFICATION_ROUNDS}: đã sửa {changed} thẻ.")
+        except RuntimeError as exc:
+            msg("Cảnh báo", f"Không kiểm tra lại hết được thẻ; thẻ chưa kiểm tra được giữ nguyên. Chi tiết: {exc}")
+            return
         if not changed:
             return
 
