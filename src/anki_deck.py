@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextvars import ContextVar, copy_context
+from copy import copy
 import hashlib
 import html
 from html.parser import HTMLParser
@@ -19,6 +20,7 @@ from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 import genanki
+import openpyxl
 
 for stream in (sys.stdout, sys.stderr):
     if hasattr(stream, "reconfigure"):
@@ -761,7 +763,43 @@ def create_apkg(cards: list[dict], reverse_cards: list[dict], deck_name: str, ou
     return output
 
 
-def generate_package(root: Path, config: dict, senses: list[dict], output: Path) -> Path:
+def copy_row_style(ws, source_row: int, target_row: int, max_col: int = 6) -> None:
+    ws.row_dimensions[target_row].height = ws.row_dimensions[source_row].height
+    for col in range(1, max_col + 1):
+        ws.cell(target_row, col)._style = copy(ws.cell(source_row, col)._style)
+
+
+def write_report(cards: list[dict], reverse_cards: list[dict], template: Path, output: Path) -> Path:
+    """The Excel report of a run: one row per chosen sense, and the practice sentences on a Reverse sheet."""
+    wb = openpyxl.load_workbook(template)
+    ws = wb.worksheets[0]
+    for row in range(2, ws.max_row + 1):
+        for col in range(1, 7):
+            ws.cell(row, col).value = None
+    for index, card in enumerate(cards, start=1):
+        row = index + 1
+        if row > ws.max_row:
+            copy_row_style(ws, 2, row)
+        values = (index, card["word"], card["part_of_speech"], card["vietnamese_meaning"], card["word_forms"], card["example_sentence"])
+        for col, value in enumerate(values, start=1):
+            ws.cell(row, col).value = value if value != "" else None
+    if "Reverse" in wb.sheetnames:
+        del wb["Reverse"]
+    reverse_ws = wb.create_sheet("Reverse")
+    reverse_ws.append(["No", "Sentence", "Keyword"])
+    for col in range(1, 4):
+        reverse_ws.cell(1, col)._style = copy(ws.cell(1, col)._style)
+    for index, reverse in enumerate(reverse_cards, start=1):
+        # the card front is HTML-escaped for Anki; the report is plain text
+        reverse_ws.append([index, html.unescape(reverse["front"]), reverse["keyword"]])
+    reverse_ws.column_dimensions["A"].width = 11
+    reverse_ws.column_dimensions["B"].width = 80
+    reverse_ws.column_dimensions["C"].width = 24
+    wb.save(output)
+    return output
+
+
+def generate_package(root: Path, config: dict, senses: list[dict], output: Path, report: Path) -> Path:
     prompt = (prompt_dir(root) / "step_2" / "agent-prompt.md").read_text(encoding="utf-8")
     reverse_prompt = (prompt_dir(root) / "step_3" / "reverse-prompt.md").read_text(encoding="utf-8")
     verify_prompt = (prompt_dir(root) / "step_4" / "verify-prompt.md").read_text(encoding="utf-8")
@@ -771,6 +809,8 @@ def generate_package(root: Path, config: dict, senses: list[dict], output: Path)
             enrich_audio(cards, reverse_cards, Path(temp_dir))
         with timed_step("Đóng gói thẻ và audio thành APKG"):
             create_apkg(cards, reverse_cards, config["deck_name"], output)
+        with timed_step("Ghi báo cáo Excel"):
+            write_report(cards, reverse_cards, root / "src" / "template" / "report-template.xlsx", report)
     return output
 
 

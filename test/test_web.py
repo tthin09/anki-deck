@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import zipfile
+import openpyxl
 import sys
 import tempfile
 import threading
@@ -76,12 +77,13 @@ class WebFlow(unittest.TestCase):
         self.assertEqual(self.client.post("/api/preview", json={"text": "😀" * 8100}).status_code, 413)
 
     def test_conversion_history_progress_ownership_and_one_download(self):
-        def fake_generate(root, config, senses, output):
+        def fake_generate(root, config, senses, output, report):
             self.assertEqual(entries(senses), ["Apple", "book"])
             web.msg("Đang chạy", "Dùng AI tạo thẻ từ vựng")
             web.msg("Đang chạy", "Lấy audio")
             web.msg("Đang chạy", "Đóng gói")
             output.write_bytes(b"sample package")
+            report.write_bytes(b"sample report")
             return output
 
         with patch.dict(os.environ, {"GEMINI_API_KEY": "secret"}), patch.object(web, "generate_package", fake_generate):
@@ -103,19 +105,26 @@ class WebFlow(unittest.TestCase):
             self.assertTrue(any("Lấy audio" in item.get("text", "") for item in events))
             result = self.client.get(f"/api/jobs/{job_id}/download")
             self.assertEqual(result.content, b"sample package")
-            self.assertRegex(result.headers["content-disposition"], r'filename="\d{6}-\d{6}-2_words\.apkg"')
+            name = result.headers["content-disposition"].split('filename="')[1].split('"')[0]
+            self.assertRegex(name, r"^\d{6}-\d{6}_deck\.apkg$")
+            # One folder per run, named after the run's time, holding the deck and the Excel report.
+            stamp = name.removesuffix("_deck.apkg")
+            run = self.data / "output" / stamp
+            self.assertEqual(sorted(path.name for path in run.iterdir()), [f"{stamp}_deck.apkg", f"{stamp}_report.xlsx"])
+            self.assertEqual((run / f"{stamp}_report.xlsx").read_bytes(), b"sample report")
             self.assertEqual(self.client.get(f"/api/jobs/{job_id}/download").status_code, 404)
-            self.assertEqual(len(list((self.data / "history").glob("*.apkg"))), 1)
+            self.assertEqual(len(list((self.data / "output").iterdir())), 1)
             with (self.data / "history" / "conversions.csv").open(encoding="utf-8", newline="") as file:
                 rows = list(csv.DictReader(file))
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["uploader"], self.client.cookies["session"])
             self.assertEqual(json.loads(rows[0]["words"]), ["Apple (n)", "book (n)"])
-            self.assertEqual(rows[0]["filename"], result.headers["content-disposition"].split('filename="')[1].split('"')[0])
+            self.assertEqual(rows[0]["filename"], name)
 
     def test_parallel_conversions_keep_distinct_packages_and_csv_rows(self):
-        def fake_generate(root, config, senses, output):
+        def fake_generate(root, config, senses, output, report):
             output.write_bytes(senses[0]["entry"].encode())
+            report.write_bytes(b"report")
         with patch.dict(os.environ, {"GEMINI_API_KEY": "secret"}), patch.object(web, "generate_package", fake_generate), TestClient(web.app) as bob:
             clients = (self.client, bob)
             ids = [convert(client, word).json()["id"] for client, word in zip(clients, ("apple", "book"))]
@@ -123,7 +132,8 @@ class WebFlow(unittest.TestCase):
                 with client.stream("GET", f"/api/jobs/{job_id}/events") as response:
                     self.assertIn('"type": "done"', "".join(response.iter_text()))
             self.assertEqual([client.get(f"/api/jobs/{job_id}/download").content for client, job_id in zip(clients, ids)], [b"apple", b"book"])
-        self.assertEqual(len(list((self.data / "history").glob("*.apkg"))), 2)
+        # Two runs in the same second still get separate folders.
+        self.assertEqual(len(list((self.data / "output").glob("*/*_deck.apkg"))), 2)
         with (self.data / "history" / "conversions.csv").open(encoding="utf-8", newline="") as file:
             self.assertEqual(len(list(csv.DictReader(file))), 2)
 
@@ -174,9 +184,10 @@ class WebFlow(unittest.TestCase):
                     {"input": "as well as", "entry": "as well as", "corrected": False, "senses": [
                         {"part_of_speech": "", "vietnamese_meaning": "cũng như", "example_sentence": "Tea <b>as well as</b> coffee."}]}]
         received = []
-        def fake_generate(root, config, senses, output):
+        def fake_generate(root, config, senses, output, report):
             received.extend(senses)
             output.write_bytes(b"deck")
+            report.write_bytes(b"report")
         research_id, done = research(self.client, "fine\nas well as", senses_of_fine)
         self.assertEqual(done["type"], "done")
         self.assertEqual([len(item["senses"]) for item in done["result"]], [2, 1])
@@ -215,7 +226,7 @@ class WebFlow(unittest.TestCase):
     def test_cancel_waits_for_provider_and_keeps_only_latest_replacement(self):
         started, release, replacement_started = threading.Event(), threading.Event(), threading.Event()
         calls = []
-        def fake_generate(root, config, senses, output):
+        def fake_generate(root, config, senses, output, report):
             words = entries(senses)
             calls.append(words[0])
             if words == ["first"]:
@@ -226,6 +237,7 @@ class WebFlow(unittest.TestCase):
             else:
                 replacement_started.set()
                 output.write_bytes(words[0].encode())
+                report.write_bytes(b"report")
         with patch.dict(os.environ, {"GEMINI_API_KEY": "secret"}), patch.object(web, "generate_package", fake_generate):
             try:
                 chosen = {word: {"research": research(self.client, word)[0], "senses": [[0, 0]]}
@@ -253,14 +265,14 @@ class WebFlow(unittest.TestCase):
                 for job_id in (first, second):
                     self.assertEqual(self.client.get(f"/api/jobs/{job_id}/download").status_code, 404)
                 self.assertEqual(self.client.get(f"/api/jobs/{third}/download").content, b"third")
-                self.assertEqual(len(list((self.data / "history").glob("*.apkg"))), 1)
-                self.assertEqual(list((self.data / "history").glob("*.part")), [])
+                self.assertEqual(len(list((self.data / "output").iterdir())), 1)
+                self.assertEqual(list((self.data / "output").glob("*.part")), [])
             finally:
                 release.set()
 
     def test_missing_heartbeat_cancels_and_cannot_be_revived(self):
         started, release = threading.Event(), threading.Event()
-        def fake_generate(root, config, senses, output):
+        def fake_generate(root, config, senses, output, report):
             started.set()
             release.wait(5)
             generator.check_cancelled()
@@ -320,9 +332,9 @@ class WebFlow(unittest.TestCase):
         company = {**card, "vietnamese_meaning": "hãng Apple", "anki_front_html": "Apple (n)", "anki_back_html": "hãng Apple"}
         phrase = {**card, "word": "as well as", "part_of_speech": "", "ipa": "", "anki_front_html": "as well as",
                   "anki_back_html": "cũng như"}
-        reverse = {"word": "apple", "front": "I ate an ____ (táo).", "back": "apple (n)", "answer": "apple"}
-        reverses = [reverse, {**reverse, "front": "____ makes phones (hãng)."},
-                    {"word": "as well as", "front": "Tea ____ coffee.", "back": "as well as", "answer": "as well as"}]
+        reverse = {"word": "apple", "front": "I ate an ____ (táo).", "back": "apple (n)", "keyword": "apple (n)", "answer": "apple"}
+        reverses = [reverse, {**reverse, "front": "____ &amp; Co. makes phones (hãng)."},
+                    {"word": "as well as", "front": "Tea ____ coffee.", "back": "as well as", "keyword": "as well as", "answer": "as well as"}]
         def fake_audio(cards, reverse_cards, directory):
             audio_path = directory / "apple.mp3"
             audio_path.write_bytes(b"ID3sample")
@@ -334,11 +346,22 @@ class WebFlow(unittest.TestCase):
         self.assertFalse(hasattr(generator, "anki"))
         with patch.object(generator, "generate_cards", return_value=([card, company, phrase], reverses)) as ai, \
              patch.object(generator, "enrich_audio", side_effect=fake_audio):
-            result = self.data / "apple.apkg"
+            result, report = self.data / "apple.apkg", self.data / "apple.xlsx"
             generator.generate_package(Path(__file__).resolve().parents[1],
                                        {"gemini_api_key": "fake", "chunk_size": 30, "deck_name": "English Vocabulary"},
-                                       [{"entry": "apple"}], result)
+                                       [{"entry": "apple"}], result, report)
             self.assertEqual(ai.call_count, 1)
+            # The Excel report: one row per chosen sense, and the practice sentences as plain text.
+            workbook = openpyxl.load_workbook(report)
+            rows = [[cell.value for cell in row[:6]] for row in workbook.worksheets[0].iter_rows()]
+            self.assertEqual(rows[0], ["No", "Word", "Part of Speech", "Vietnamese Meaning", "Word Forms", "Example Sentences"])
+            self.assertEqual(rows[1:4], [[1, "apple", "n", "táo", "apples (n)", "I ate an apple."],
+                                         [2, "apple", "n", "hãng Apple", "apples (n)", "I ate an apple."],
+                                         [3, "as well as", None, "táo", "apples (n)", "I ate an apple."]])
+            self.assertTrue(all(row[1] is None for row in rows[4:]))
+            practice = [[cell.value for cell in row] for row in workbook["Reverse"].iter_rows()]
+            self.assertEqual(practice, [["No", "Sentence", "Keyword"], [1, "I ate an ____ (táo).", "apple (n)"],
+                                        [2, "____ & Co. makes phones (hãng).", "apple (n)"], [3, "Tea ____ coffee.", "as well as"]])
             with zipfile.ZipFile(result) as package:
                 self.assertIn("collection.anki2", package.namelist())
                 collection = self.data / "collection.anki2"
@@ -366,7 +389,7 @@ class WebFlow(unittest.TestCase):
             self.assertNotIn("secret", output)
             self.assertEqual(self.client.get(f"/api/jobs/{job_id}/download").status_code, 404)
             self.assertFalse((self.data / "history" / "conversions.csv").exists())
-            self.assertEqual(list((self.data / "history").glob("*.apkg")), [])
+            self.assertEqual(list((self.data / "output").glob("*")), [])
 
 
 CARD = {"word": "like", "example_sentence": "I like tea.", "vietnamese_meaning": "thích", "part_of_speech": "v",

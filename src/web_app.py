@@ -6,6 +6,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -235,21 +236,26 @@ def research(job: dict):
 def convert(job: dict):
     token = progress_sink.set(lambda line: progress(job, line))
     cancel_token = cancellation_check.set(lambda: check_job(job))
-    output = DATA / "history" / job["filename"]
-    temporary = output.with_suffix(".apkg.part")
+    # One folder per run; it is written as "<stamp>.part" and renamed only once both files are complete.
+    stamp = job["stamp"]
+    folder = DATA / "output" / stamp
+    temporary = folder.with_name(f"{stamp}.part")
+    deck, report = f"{stamp}_deck.apkg", f"{stamp}_report.xlsx"
     senses = job["senses"]
     try:
         config = ai_config()
-        output.parent.mkdir(parents=True, exist_ok=True)
+        temporary.mkdir(parents=True, exist_ok=True)
+        (DATA / "history").mkdir(parents=True, exist_ok=True)
         check_job(job)
-        generate_package(ROOT, config, senses, temporary)
+        generate_package(ROOT, config, senses, temporary / deck, temporary / report)
         check_job(job)
-        with temporary.open("rb") as file:
-            os.fsync(file.fileno())
+        for name in (deck, report):
+            with (temporary / name).open("rb") as file:
+                os.fsync(file.fileno())
         # ponytail: one process holds this lock; use a database if multiple server workers are needed.
         with lock:
             check_job(job)
-            os.replace(temporary, output)
+            os.replace(temporary, folder)
             path = DATA / "history" / "conversions.csv"
             with path.open("a", encoding="utf-8", newline="") as file:
                 writer = csv.writer(file)
@@ -257,27 +263,27 @@ def convert(job: dict):
                     writer.writerow(["filename", "uploader", "created_utc", "words"])
                 chosen = [f"{sense['entry']} ({sense['part_of_speech']})" if sense["part_of_speech"] else sense["entry"]
                           for sense in senses]
-                writer.writerow([output.name, job["user"], datetime.now(timezone.utc).isoformat(), json.dumps(chosen, ensure_ascii=False)])
+                writer.writerow([deck, job["user"], datetime.now(timezone.utc).isoformat(), json.dumps(chosen, ensure_ascii=False)])
                 file.flush()
                 os.fsync(file.fileno())
-            for parent in (output.parent, DATA):
+            for parent in (folder, folder.parent, path.parent, DATA):
                 directory = os.open(parent, os.O_RDONLY)
                 try:
                     os.fsync(directory)
                 finally:
                     os.close(directory)
-            job["file"] = output
-            progress(job, f"[OK       ] File APKG: {output.name}")
+            job["file"] = folder / deck
+            progress(job, f"[OK       ] Đã lưu: output/{stamp}/ ({deck}, {report})")
             finish(job, "done")
     except ConversionCancelled:
         finish(job, "cancelled")
     except Exception:
-        output.unlink(missing_ok=True)
+        shutil.rmtree(folder, ignore_errors=True)
         progress(job, "[Lỗi      ] Không thể tạo gói. Kiểm tra dịch vụ và thử lại.")
         finish(job, "failed")
     finally:
         try:
-            temporary.unlink(missing_ok=True)
+            shutil.rmtree(temporary, ignore_errors=True)
         finally:
             cancellation_check.reset(cancel_token)
             progress_sink.reset(token)
@@ -321,7 +327,7 @@ def queue(user: str, run, **fields) -> str:
     if active:
         finish(active, "cancelled")
     job_id = uuid4().hex
-    job = {"user": user, "created": time.time(), "run": run, "filename": None,
+    job = {"user": user, "created": time.time(), "run": run, "stamp": None,
            "condition": threading.Condition(), "events": [], "percent": 5,
            "file": None, "downloaded": False, "state": "queued", "heartbeat": time.monotonic(), **fields}
     jobs[job_id] = job
@@ -370,12 +376,12 @@ def start(data: Choice, response: Response, session: str | None = Cookie(default
     started = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh"))
     with lock:
         forget_old_jobs()
-        filenames = {job["filename"] for job in jobs.values()}
-        filename = f"{started:%d%m%y-%H%M%S}-{len(senses)}_words.apkg"
-        while filename in filenames or (DATA / "history" / filename).exists():
+        stamps = {job["stamp"] for job in jobs.values()}
+        stamp = f"{started:%H%M%S-%d%m%y}"
+        while stamp in stamps or (DATA / "output" / stamp).exists():
             started += timedelta(seconds=1)
-            filename = f"{started:%d%m%y-%H%M%S}-{len(senses)}_words.apkg"
-        return {"id": queue(user, convert, filename=filename, senses=senses)}
+            stamp = f"{started:%H%M%S-%d%m%y}"
+        return {"id": queue(user, convert, stamp=stamp, senses=senses)}
 
 
 @app.post("/api/jobs/{job_id}/cancel")
