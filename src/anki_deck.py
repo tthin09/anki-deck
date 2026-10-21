@@ -25,6 +25,7 @@ for stream in (sys.stdout, sys.stderr):
         stream.reconfigure(encoding="utf-8", errors="replace")
 
 
+WORD_PARTS_OF_SPEECH = ["n", "v", "adj", "adv", "prep", "conj", "pron", "det"]
 CARD_SCHEMA = {
     "type": "object",
     "properties": {
@@ -37,7 +38,7 @@ CARD_SCHEMA = {
                     # sentence and meaning come first so the part of speech is chosen from them
                     "example_sentence": {"type": "string"},
                     "vietnamese_meaning": {"type": "string"},
-                    "part_of_speech": {"type": "string"},
+                    "part_of_speech": {"type": "string", "enum": [*WORD_PARTS_OF_SPEECH, ""]},
                     "ipa": {"type": "string"},
                     "word_forms": {"type": "string"},
                     "synonyms": {"type": "array", "items": {"type": "string"}},
@@ -72,7 +73,7 @@ REVERSE_SCHEMA = {
                 "properties": {
                     "word": {"type": "string"},
                     "sentence": {"type": "string"},
-                    "part_of_speech": {"type": "string"},
+                    "part_of_speech": {"type": "string", "enum": [*WORD_PARTS_OF_SPEECH, ""]},
                     "vietnamese_hint": {"type": "string"},
                 },
                 "required": ["word", "sentence", "part_of_speech", "vietnamese_hint"],
@@ -103,7 +104,6 @@ VERIFY_SCHEMA = {
     },
     "required": ["pairs"],
 }
-WORD_PARTS_OF_SPEECH = ["n", "v", "adj", "adv", "prep", "conj", "pron", "det"]
 RESEARCH_MAX_SENSES = 4
 RESEARCH_SCHEMA = {
     "type": "object",
@@ -146,7 +146,6 @@ AUDIO_BUTTON_STYLE = "<style>.replay-button{display:block!important;text-align:c
 AUDIO_DOWNLOAD_RETRIES = 3
 AUDIO_DOWNLOAD_MAX_BYTES = 10 * 1024 * 1024
 AUDIO_DOWNLOAD_RETRY_CODES = {429, 500, 502, 503, 504}
-PARTS_OF_SPEECH = {"n", "v", "adj", "adv", "prep", "conj", "pron", "det", "np", "vp", "adjp", "advp", "s"}
 
 
 def src_dir(root: Path) -> Path:
@@ -395,8 +394,9 @@ def enrich_audio(cards: list[dict], reverse_cards: list[dict], audio_dir: Path |
         path = download_audio(audio, audio_dir)
         return {**audio, "path": str(path)}
 
+    # phrases get no audio
     terms = {item.casefold(): item for item in
-             [card["word"] for card in cards] + [card["answer"] for card in reverse_cards]}
+             [card["word"] for card in cards] + [card["answer"] for card in reverse_cards] if not is_phrase(item)}
     unique_terms = list(terms.items())
 
     def fetch(item: tuple[str, str]) -> tuple[str, dict | None]:
@@ -438,7 +438,7 @@ def enrich_audio(cards: list[dict], reverse_cards: list[dict], audio_dir: Path |
     for card in cards:
         key = card["word"].casefold()
         card["audio"] = by_word[key]
-        if card["audio"] is None:
+        if card["audio"] is None and key in trace_cache:
             msg(
                 "Cảnh báo",
                 f"Không tìm thấy audio cho '{card['word']}' sau: {'; '.join(trace_cache[key])}. "
@@ -446,7 +446,7 @@ def enrich_audio(cards: list[dict], reverse_cards: list[dict], audio_dir: Path |
             )
     for reverse in reverse_cards:
         reverse["audio"] = cache.get(reverse["answer"].casefold()) or by_word.get(reverse["word"].casefold())
-        if reverse["audio"] is None:
+        if reverse["audio"] is None and reverse["answer"].casefold() in trace_cache:
             msg(
                 "Cảnh báo",
                 f"Không tìm thấy audio cho đáp án '{reverse['answer']}' sau: "
@@ -570,39 +570,49 @@ def validate_research(entries: list[str], data: dict) -> list[dict]:
     return results
 
 
-def llm_cards(words: list[str], prompt: str, config: dict) -> list[dict]:
-    data = llm_json(words, prompt, CARD_SCHEMA, "cards", config)
-    return validate_cards(data)
+def plain(html_text: str) -> str:
+    return re.sub(r"<[^>]+>", "", html_text)
 
 
-def llm_practice_cards(cards: list[dict], prompt: str, config: dict) -> list[dict]:
+def llm_cards(senses: list[dict], prompt: str, config: dict) -> list[dict]:
+    items = [{"word": sense["entry"], "part_of_speech": sense["part_of_speech"], "vietnamese_meaning": sense["vietnamese_meaning"],
+              "research_example": plain(sense["example_sentence"])} for sense in senses]
+    data = llm_json(items, prompt, CARD_SCHEMA, "cards", config)
+    cards = data.get("cards") if isinstance(data, dict) else None
+    if not isinstance(cards, list) or len(cards) != len(senses):
+        raise RuntimeError("AI không trả về đủ thẻ. Chưa tạo bộ thẻ.")
+    return [validate_card(card, sense) for card, sense in zip(cards, senses)]
+
+
+def llm_practice_cards(cards: list[dict], senses: list[dict], prompt: str, config: dict) -> list[dict]:
     items = [
-        {key: card[key] for key in ("word", "part_of_speech", "vietnamese_meaning", "word_forms", "example_sentence")}
-        for card in cards
+        {**{key: card[key] for key in ("word", "part_of_speech", "vietnamese_meaning")},
+         "avoid_sentences": [card["example_sentence"], plain(sense["example_sentence"])]}
+        for card, sense in zip(cards, senses)
     ]
     data = llm_json(items, prompt, REVERSE_SCHEMA, "practice_cards", config)
-    return validate_practice_cards(cards, data)
+    return validate_practice_cards(cards, senses, data)
 
 
-def validate_cards(data: dict) -> list[dict]:
-    cards = data.get("cards")
-    if not isinstance(cards, list) or not cards:
-        raise RuntimeError("AI không trả về danh sách thẻ hợp lệ. Chưa tạo bộ thẻ.")
-    required = set(CARD_SCHEMA["properties"]["cards"]["items"]["required"])
-    for card in cards:
-        if not isinstance(card, dict) or required - card.keys():
-            raise RuntimeError("AI trả về thẻ thiếu dữ liệu. Chưa tạo bộ thẻ.")
-        if not isinstance(card["synonyms"], list):
-            raise RuntimeError("AI trả về synonyms không hợp lệ. Chưa tạo bộ thẻ.")
-    for card in cards:
-        parts = str(card["part_of_speech"]).split("/")
-        if any(part not in PARTS_OF_SPEECH for part in parts) or len(set(parts)) != len(parts):
-            raise RuntimeError(f"AI trả về part_of_speech không hợp lệ cho '{card['word']}'. Chưa tạo bộ thẻ.")
-    return [{key: card[key] for key in required} for card in cards]
+def validate_card(card: dict, sense: dict) -> dict:
+    """A generated card must be for the chosen sense: same entry and part of speech."""
+    required = CARD_SCHEMA["properties"]["cards"]["items"]["required"]
+    if not isinstance(card, dict) or set(required) - card.keys() or not isinstance(card["synonyms"], list):
+        raise RuntimeError("AI trả về thẻ thiếu dữ liệu. Chưa tạo bộ thẻ.")
+    entry = sense["entry"]
+    if str(card["word"]).casefold() != entry.casefold():
+        raise RuntimeError(f"AI trả về thẻ cho từ khác thay vì '{entry}'. Chưa tạo bộ thẻ.")
+    if card["part_of_speech"] != sense["part_of_speech"]:
+        raise RuntimeError(f"AI trả về thẻ sai từ loại cho '{entry}'. Chưa tạo bộ thẻ.")
+    validated = {key: card[key] for key in required}
+    validated["word"] = entry
+    if is_phrase(entry):
+        validated["ipa"] = validated["word_forms"] = ""
+    return validated
 
 
 def normalize_sentence(text: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"</?str>", "", text).strip()).casefold()
+    return re.sub(r"\s+", " ", re.sub(r"</?(?:str|b)>", "", text).strip()).casefold()
 
 
 def answer_text(sentence: str) -> str:
@@ -627,46 +637,45 @@ def make_reverse_note(card: dict, reverse: dict) -> dict:
         count=1,
         flags=re.IGNORECASE | re.DOTALL,
     )
-    keyword = f"{answer} ({reverse['part_of_speech']})"
+    keyword = f"{answer} ({reverse['part_of_speech']})" if reverse["part_of_speech"] else answer
     return {"front": html.escape(front), "back": html.escape(keyword), "keyword": keyword, "word": card["word"], "answer": answer}
 
 
-def validate_practice_cards(cards: list[dict], data: dict) -> list[dict]:
-    """Return the AI's practice cards in the same order as their vocabulary cards."""
+def validate_practice_cards(cards: list[dict], senses: list[dict], data: dict) -> list[dict]:
+    """Return the AI's practice cards, one per vocabulary card and in the same order."""
     practice = data.get("cards") if isinstance(data, dict) else None
     if not isinstance(practice, list) or len(practice) != len(cards):
         raise RuntimeError("AI không trả về đủ câu luyện tập. Chưa tạo bộ thẻ.")
     keys = REVERSE_SCHEMA["properties"]["cards"]["items"]["required"]
-    by_word = {str(item.get("word")).casefold(): item for item in practice if isinstance(item, dict)}
     validated = []
-    for card in cards:
-        item = by_word.get(card["word"].casefold())
-        if item is None or set(keys) - item.keys():
+    for card, sense, item in zip(cards, senses, practice):
+        if not isinstance(item, dict) or set(keys) - item.keys() or str(item["word"]).casefold() != card["word"].casefold():
             raise RuntimeError("AI trả về câu luyện tập thiếu dữ liệu. Chưa tạo bộ thẻ.")
         answer_text(item["sentence"])
-        if item["part_of_speech"] not in str(card["part_of_speech"]).split("/"):
+        if item["part_of_speech"] != card["part_of_speech"]:
             raise RuntimeError(f"AI trả về câu luyện tập sai từ loại cho '{card['word']}'. Chưa tạo bộ thẻ.")
-        if normalize_sentence(item["sentence"]) == normalize_sentence(card["example_sentence"]):
+        if normalize_sentence(item["sentence"]) in {normalize_sentence(card["example_sentence"]),
+                                                     normalize_sentence(sense["example_sentence"])}:
             raise RuntimeError("AI trả về câu luyện tập trùng câu ví dụ. Chưa tạo bộ thẻ.")
-        validated.append({key: item[key] for key in keys})
+        validated.append({**{key: item[key] for key in keys}, "word": card["word"]})
     return validated
 
 
-def verified_pair(card: dict, practice: dict, fix: dict | None) -> tuple[dict, dict]:
-    """Take the verification's correction only if it is still a valid card pair for the same word."""
+def verified_pair(card: dict, practice: dict, sense: dict, fix: dict | None) -> tuple[dict, dict]:
+    """Take the verification's correction only if it is still a valid card pair for the same sense."""
     try:
-        new_card = {**validate_cards({"cards": [fix["card"]]})[0], "word": card["word"]}
-        if fix["card"]["word"].casefold() != card["word"].casefold():
+        new_card = validate_card(fix["card"], {"entry": card["word"], "part_of_speech": card["part_of_speech"]})
+        if new_card["vietnamese_meaning"] != card["vietnamese_meaning"]:
             return card, practice
         # the front shows the part of speech too; a fix that relabels only one of them is rejected
-        if f"({new_card['part_of_speech']})" not in new_card["anki_front_html"]:
+        if card["part_of_speech"] and f"({card['part_of_speech']})" not in new_card["anki_front_html"]:
             return card, practice
-        return new_card, validate_practice_cards([new_card], {"cards": [fix["practice_card"]]})[0]
+        return new_card, validate_practice_cards([new_card], [sense], {"cards": [fix["practice_card"]]})[0]
     except (RuntimeError, KeyError, TypeError, AttributeError):
         return card, practice
 
 
-def verify_cards(cards: list[dict], practice: list[dict], prompt: str, config: dict) -> None:
+def verify_cards(cards: list[dict], practice: list[dict], senses: list[dict], prompt: str, config: dict) -> None:
     """Verification: let the AI correct card pairs in place, keeping the originals if it fails."""
     for round_number in range(1, VERIFICATION_ROUNDS + 1):
         changed = 0
@@ -679,9 +688,10 @@ def verify_cards(cards: list[dict], practice: list[dict], prompt: str, config: d
                     pairs = data.get("pairs") if isinstance(data, dict) else None
                     if not isinstance(pairs, list):
                         raise RuntimeError("AI trả về kết quả kiểm tra không hợp lệ.")
-                    fixes = {str(pair.get("word")).casefold(): pair for pair in pairs if isinstance(pair, dict)}
-                    for i in indexes:
-                        pair = verified_pair(cards[i], practice[i], fixes.get(cards[i]["word"].casefold()))
+                    # pairs come back in input order; two senses of one word share a "word"
+                    for offset, i in enumerate(indexes):
+                        fix = pairs[offset] if offset < len(pairs) else None
+                        pair = verified_pair(cards[i], practice[i], senses[i], fix)
                         if pair != (cards[i], practice[i]):
                             cards[i], practice[i] = pair
                             changed += 1
@@ -721,18 +731,19 @@ def create_apkg(cards: list[dict], reverse_cards: list[dict], deck_name: str, ou
         for item in items:
             check_cancelled()
             audio = item.get("audio")
+            tags = ["ai-vocab", tag] if tag == "reverse" else [tag]
             note = package_note(
                 item[front_key],
                 item[back_key],
-                ["ai-vocab", tag] if tag == "reverse" else [tag],
+                tags + ["phrase"] if is_phrase(item["word"]) else tags,
                 audio,
                 "Back" if tag == "reverse" else "Front",
             )
+            # no fixed guid: genanki derives it from the fields, so senses of one word never overwrite each other
             deck.add_note(genanki.Note(
                 model=model,
                 fields=[note["fields"]["Front"], note["fields"]["Back"]],
                 tags=note["tags"],
-                guid=genanki.guid_for(tag, item["word"].casefold()),
             ))
             if audio:
                 audio_path = Path(audio["path"])
@@ -746,11 +757,11 @@ def create_apkg(cards: list[dict], reverse_cards: list[dict], deck_name: str, ou
     return output
 
 
-def generate_package(root: Path, config: dict, words: list[str], output: Path) -> Path:
+def generate_package(root: Path, config: dict, senses: list[dict], output: Path) -> Path:
     prompt = (src_dir(root) / "agent-prompt.md").read_text(encoding="utf-8")
     reverse_prompt = (src_dir(root) / "reverse-prompt.md").read_text(encoding="utf-8")
     verify_prompt = (src_dir(root) / "verify-prompt.md").read_text(encoding="utf-8")
-    cards, reverse_cards = generate_cards(words, prompt, reverse_prompt, verify_prompt, config)
+    cards, reverse_cards = generate_cards(senses, prompt, reverse_prompt, verify_prompt, config)
     with tempfile.TemporaryDirectory(prefix="anki-deck-audio-") as temp_dir:
         with timed_step("Lấy audio phát âm từ Wiktionary và Google TTS"):
             enrich_audio(cards, reverse_cards, Path(temp_dir))
@@ -760,17 +771,18 @@ def generate_package(root: Path, config: dict, words: list[str], output: Path) -
 
 
 def generate_cards(
-    words: list[str], prompt: str, reverse_prompt: str, verify_prompt: str, config: dict
+    senses: list[dict], prompt: str, reverse_prompt: str, verify_prompt: str, config: dict
 ) -> tuple[list[dict], list[dict]]:
+    """One vocabulary card and one practice card per chosen sense, in order."""
+    size = int(config["chunk_size"])
     all_cards: list[dict] = []
-    word_batches = chunks(words, int(config["chunk_size"]))
-    for index, batch in enumerate(word_batches, start=1):
-        with timed_step(f"Dùng AI tạo thẻ từ vựng, đợt {index}/{len(word_batches)} ({len(batch)} từ)"):
+    batches = chunks(senses, size)
+    for index, batch in enumerate(batches, start=1):
+        with timed_step(f"Dùng AI tạo thẻ từ vựng, đợt {index}/{len(batches)} ({len(batch)} từ)"):
             all_cards.extend(llm_cards(batch, prompt, config))
     all_practice: list[dict] = []
-    practice_batches = chunks(all_cards, int(config["chunk_size"]))
-    for index, batch in enumerate(practice_batches, start=1):
-        with timed_step(f"Dùng AI tạo thẻ luyện tập, đợt {index}/{len(practice_batches)} ({len(batch)} từ)"):
-            all_practice.extend(llm_practice_cards(batch, reverse_prompt, config))
-    verify_cards(all_cards, all_practice, verify_prompt, config)
+    for index, start in enumerate(range(0, len(senses), size), start=1):
+        with timed_step(f"Dùng AI tạo thẻ luyện tập, đợt {index}/{len(batches)} ({len(batches[index - 1])} từ)"):
+            all_practice.extend(llm_practice_cards(all_cards[start:start + size], senses[start:start + size], reverse_prompt, config))
+    verify_cards(all_cards, all_practice, senses, verify_prompt, config)
     return all_cards, [make_reverse_note(card, practice) for card, practice in zip(all_cards, all_practice)]
