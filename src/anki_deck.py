@@ -11,6 +11,7 @@ import re
 import socket
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -148,6 +149,9 @@ AUDIO_BUTTON_STYLE = "<style>.replay-button{display:block!important;text-align:c
 AUDIO_DOWNLOAD_RETRIES = 3
 AUDIO_DOWNLOAD_MAX_BYTES = 10 * 1024 * 1024
 AUDIO_DOWNLOAD_RETRY_CODES = {429, 500, 502, 503, 504}
+# upload.wikimedia.org refuses bursts (429 "robot policy") after ~10 quick files; one file per second passes
+WIKIMEDIA_DOWNLOAD_GAP = 1.0
+USER_AGENT = "anki-deck/1.0 (https://github.com/tthin09/anki-deck)"
 
 
 def prompt_dir(root: Path) -> Path:
@@ -161,6 +165,44 @@ _active_step: ContextVar = ContextVar("active_step", default=None)
 
 class ConversionCancelled(Exception):
     pass
+
+
+class ApiStats:
+    """Per-run tally of every external call, for the API sheet of the Excel report."""
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.counts: dict[str, dict] = {}
+
+    def record(self, api: str, outcome: str, detail: str = "") -> None:
+        with self.lock:
+            entry = self.counts.setdefault(api, {"ok": 0, "none": 0, "error": 0, "details": {}})
+            entry[outcome] += 1
+            if detail:
+                entry["details"][detail] = entry["details"].get(detail, 0) + 1
+
+    def rows(self) -> list[list]:
+        with self.lock:
+            rows = []
+            for api, entry in self.counts.items():
+                calls = entry["ok"] + entry["none"] + entry["error"]
+                details = ", ".join(f"{kind} ×{count}" for kind, count in entry["details"].items())
+                rows.append([api, calls, entry["ok"], entry["none"], entry["error"], f"{round(100 * entry['ok'] / calls)}%", details])
+            return rows
+
+
+api_stats: ContextVar = ContextVar("api_stats", default=None)
+
+
+def record_api(api: str, outcome: str, problem: Exception | str | None = None) -> None:
+    """Count one external call in this run's ApiStats; an error is labelled by HTTP code, timeout or connection."""
+    stats = api_stats.get()
+    if stats is None:
+        return
+    detail = problem if isinstance(problem, str) else ""
+    if isinstance(problem, Exception):
+        code = re.search(r"\b([45]\d\d)\b", str(problem))
+        detail = code.group(1) if code else "timeout" if "timed out" in str(problem).lower() else "connection"
+    stats.record(api, outcome, detail)
 
 
 def check_cancelled() -> None:
@@ -267,6 +309,20 @@ def audio_metadata(url: str) -> dict | None:
     }
 
 
+_wikimedia_lock = threading.Lock()
+_wikimedia_next = 0.0
+
+
+def wait_for_wikimedia(sleep) -> None:
+    """Space Wikimedia downloads WIKIMEDIA_DOWNLOAD_GAP apart, across all audio threads."""
+    global _wikimedia_next
+    with _wikimedia_lock:
+        delay = _wikimedia_next - time.monotonic()
+        if delay > 0:
+            sleep(delay)
+        _wikimedia_next = time.monotonic() + WIKIMEDIA_DOWNLOAD_GAP
+
+
 def download_audio(
     audio: dict,
     directory: Path,
@@ -276,9 +332,12 @@ def download_audio(
     check_cancelled()
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / audio["filename"]
-    request = Request(audio["url"], headers={"User-Agent": "anki-deck/1.0 (audio download)"})
+    request = Request(audio["url"], headers={"User-Agent": f"{USER_AGENT} audio download"})
+    paced = urlparse(audio["url"]).hostname == "upload.wikimedia.org"
     for attempt in range(AUDIO_DOWNLOAD_RETRIES):
         check_cancelled()
+        if paced:
+            wait_for_wikimedia(sleep)
         try:
             with (opener or urlopen)(request, timeout=30) as response:
                 data = response.read(AUDIO_DOWNLOAD_MAX_BYTES + 1)
@@ -313,10 +372,11 @@ def is_mp3(data: bytes) -> bool:
 
 
 def wiktionary_audio_from_html(page: str) -> dict | None:
-    english = re.search(r'<h2 id="English">.*?(?=<h2|\Z)', page, flags=re.DOTALL)
+    # headings carry other attributes too, e.g. <h2 data-mw-wikitext="" id="English">
+    english = re.search(r'<h2\b[^>]*\bid="English"[^>]*>.*?(?=<h2\b|\Z)', page, flags=re.DOTALL)
     if not english:
         return None
-    for url in re.findall(r'<source src="([^"]+)" type="audio/mpeg"', english.group(0)):
+    for url in re.findall(r'<source\b[^>]*\bsrc="([^"]+)"[^>]*\btype="audio/mpeg"', english.group(0)):
         audio = audio_metadata(url)
         if audio:
             return audio
@@ -324,15 +384,31 @@ def wiktionary_audio_from_html(page: str) -> dict | None:
 
 
 def wiktionary_audio(text: str) -> dict | None:
-    check_cancelled()
     url = f"https://en.wiktionary.org/w/rest.php/v1/page/{quote(text, safe='')}/html"
-    try:
-        with urlopen(Request(url, headers={"User-Agent": "anki-deck/1.0 (audio lookup)"}), timeout=20) as response:
-            return wiktionary_audio_from_html(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        raise RuntimeError(f"Wiktionary trả về lỗi {exc.code}.") from exc
-    except (URLError, TimeoutError, ConnectionError, socket.timeout, UnicodeError) as exc:
-        raise RuntimeError(f"Không đọc được Wiktionary: {exc}") from exc
+    # Wikimedia asks for a User-Agent that identifies the tool
+    request = Request(url, headers={"User-Agent": f"{USER_AGENT} audio lookup"})
+    for attempt in range(3):
+        check_cancelled()
+        try:
+            with urlopen(request, timeout=20) as response:
+                audio = wiktionary_audio_from_html(response.read().decode("utf-8"))
+            record_api("Wiktionary lookup", "ok" if audio else "none")
+            return audio
+        except HTTPError as exc:
+            record_api("Wiktionary lookup", "error", exc)
+            # 429: several lookups run at once and Wikimedia asks us to slow down; wait as told, then retry
+            if exc.code not in AUDIO_DOWNLOAD_RETRY_CODES or attempt == 2:
+                raise RuntimeError(f"Wiktionary trả về lỗi {exc.code}.") from exc
+            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+            try:
+                delay = min(10.0, max(1.0, float(retry_after)))
+            except (TypeError, ValueError):
+                delay = float(2 ** attempt)
+            time.sleep(delay)
+        except (URLError, TimeoutError, ConnectionError, socket.timeout, UnicodeError) as exc:
+            record_api("Wiktionary lookup", "error", exc)
+            raise RuntimeError(f"Không đọc được Wiktionary: {exc}") from exc
+    return None
 
 
 def google_tts_audio(text: str) -> dict | None:
@@ -367,7 +443,9 @@ def resolve_audio(
         if audio and prepare:
             try:
                 audio = prepare(audio)
+                record_api(f"{name} mp3 download", "ok")
             except RuntimeError as exc:
+                record_api(f"{name} mp3 download", "error", exc)
                 if trace is not None:
                     trace.append(f"{source.__name__}: download error ({exc})")
                 if announce:
@@ -471,6 +549,7 @@ def local_llm_json(items: list, prompt: str, schema: dict, name: str, config: di
         with urlopen(Request(f"{base}/v1/models"), timeout=10) as response:
             model = json.loads(response.read().decode("utf-8"))["data"][0]["id"]
     except (URLError, TimeoutError, ConnectionError, socket.timeout, KeyError, IndexError, ValueError) as exc:
+        record_api("Local AI (Qwen)", "error", exc)
         raise RuntimeError(f"Không thể kết nối tới dịch vụ: {exc}") from exc
     payload = {
         "model": model,
@@ -480,11 +559,18 @@ def local_llm_json(items: list, prompt: str, schema: dict, name: str, config: di
         # this vLLM ignores response_format when thinking is on
         "chat_template_kwargs": {"enable_thinking": False},
     }
-    response = post_json(f"{base}/v1/chat/completions", payload, timeout=LLM_TIMEOUT)
     try:
-        return json.loads(response["choices"][0]["message"]["content"])
+        response = post_json(f"{base}/v1/chat/completions", payload, timeout=LLM_TIMEOUT)
+    except RuntimeError as exc:
+        record_api("Local AI (Qwen)", "error", exc)
+        raise
+    try:
+        data = json.loads(response["choices"][0]["message"]["content"])
     except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        record_api("Local AI (Qwen)", "error", "unreadable answer")
         raise RuntimeError("AI trả về dữ liệu không đọc được. Chưa tạo bộ thẻ.") from exc
+    record_api("Local AI (Qwen)", "ok")
+    return data
 
 
 def llm_json(items: list, prompt: str, schema: dict, name: str, config: dict) -> dict:
@@ -512,8 +598,10 @@ def gemini_json(items: list[dict | str], prompt: str, schema: dict, config: dict
         check_cancelled()
         try:
             response = post_json(url, payload, timeout=30)
+            record_api("Gemini (fallback)", "ok")
             break
         except RuntimeError as exc:
+            record_api("Gemini (fallback)", "error", exc)
             last_error = exc
             if attempt == 3 or not is_busy_ai_error(exc):
                 raise RuntimeError(
@@ -769,8 +857,9 @@ def copy_row_style(ws, source_row: int, target_row: int, max_col: int = 6) -> No
         ws.cell(target_row, col)._style = copy(ws.cell(source_row, col)._style)
 
 
-def write_report(cards: list[dict], reverse_cards: list[dict], template: Path, output: Path) -> Path:
-    """The Excel report of a run: one row per chosen sense, and the practice sentences on a Reverse sheet."""
+def write_report(cards: list[dict], reverse_cards: list[dict], template: Path, output: Path, api_rows: list[list] = ()) -> Path:
+    """The Excel report of a run: one row per chosen sense, the practice sentences on a Reverse sheet,
+    and how each external API did on an API sheet."""
     wb = openpyxl.load_workbook(template)
     ws = wb.worksheets[0]
     for row in range(2, ws.max_row + 1):
@@ -795,6 +884,14 @@ def write_report(cards: list[dict], reverse_cards: list[dict], template: Path, o
     reverse_ws.column_dimensions["A"].width = 11
     reverse_ws.column_dimensions["B"].width = 80
     reverse_ws.column_dimensions["C"].width = 24
+    api_ws = wb.create_sheet("API")
+    api_ws.append(["API", "Calls", "Success", "No result", "Errors", "Success rate", "Error details"])
+    for col in range(1, 8):
+        api_ws.cell(1, col)._style = copy(ws.cell(1, min(col, 6))._style)
+    for row in api_rows:
+        api_ws.append(row)
+    for col, width in zip("ABCDEFG", (26, 8, 9, 11, 8, 13, 30)):
+        api_ws.column_dimensions[col].width = width
     wb.save(output)
     return output
 
@@ -803,14 +900,19 @@ def generate_package(root: Path, config: dict, senses: list[dict], output: Path,
     prompt = (prompt_dir(root) / "step_2" / "agent-prompt.md").read_text(encoding="utf-8")
     reverse_prompt = (prompt_dir(root) / "step_3" / "reverse-prompt.md").read_text(encoding="utf-8")
     verify_prompt = (prompt_dir(root) / "step_4" / "verify-prompt.md").read_text(encoding="utf-8")
-    cards, reverse_cards = generate_cards(senses, prompt, reverse_prompt, verify_prompt, config)
-    with tempfile.TemporaryDirectory(prefix="anki-deck-audio-") as temp_dir:
-        with timed_step("Lấy audio phát âm từ Wiktionary và Google TTS"):
-            enrich_audio(cards, reverse_cards, Path(temp_dir))
-        with timed_step("Đóng gói thẻ và audio thành APKG"):
-            create_apkg(cards, reverse_cards, config["deck_name"], output)
-        with timed_step("Ghi báo cáo Excel"):
-            write_report(cards, reverse_cards, root / "src" / "template" / "report-template.xlsx", report)
+    stats = ApiStats()
+    token = api_stats.set(stats)
+    try:
+        cards, reverse_cards = generate_cards(senses, prompt, reverse_prompt, verify_prompt, config)
+        with tempfile.TemporaryDirectory(prefix="anki-deck-audio-") as temp_dir:
+            with timed_step("Lấy audio phát âm từ Wiktionary và Google TTS"):
+                enrich_audio(cards, reverse_cards, Path(temp_dir))
+            with timed_step("Đóng gói thẻ và audio thành APKG"):
+                create_apkg(cards, reverse_cards, config["deck_name"], output)
+            with timed_step("Ghi báo cáo Excel"):
+                write_report(cards, reverse_cards, root / "src" / "template" / "report-template.xlsx", report, stats.rows())
+    finally:
+        api_stats.reset(token)
     return output
 
 

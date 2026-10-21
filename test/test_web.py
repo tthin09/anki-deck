@@ -307,6 +307,51 @@ class WebFlow(unittest.TestCase):
         self.assertNotIn("<b>", reverse["front"])
         self.assertIn("&lt;b&gt;", reverse["front"])
 
+    def test_wiktionary_audio_is_found_under_current_heading_markup(self):
+        page = ('<h2 data-mw-wikitext="" id="English">English</h2><audio>'
+                '<source src="//upload.wikimedia.org/a/ensure.wav" type="audio/wav"/>'
+                '<source src="//upload.wikimedia.org/transcoded/a/ensure.wav.mp3" type="audio/mpeg" data-transcodekey="mp3"/>'
+                '</audio><h2 id="French">French</h2><source src="//x/fr.mp3" type="audio/mpeg"/>')
+        self.assertEqual(generator.wiktionary_audio_from_html(page)["url"], "https://upload.wikimedia.org/transcoded/a/ensure.wav.mp3")
+
+    def test_wiktionary_waits_out_rate_limits_and_every_call_is_counted(self):
+        page = '<h2 id="English">English</h2><source src="//u/a.mp3" type="audio/mpeg"/>'
+        answers = [generator.HTTPError("u", 429, "Too Many Requests", {"Retry-After": "3"}, None), FakeResponse(page)]
+        def fake_urlopen(request, timeout=None):
+            answer = answers.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            answer.body = page.encode()
+            return answer
+        slept, stats = [], generator.ApiStats()
+        token = generator.api_stats.set(stats)
+        try:
+            with patch.object(generator, "urlopen", new=fake_urlopen), patch.object(generator.time, "sleep", new=slept.append):
+                self.assertEqual(generator.wiktionary_audio("ensure")["url"], "https://u/a.mp3")
+        finally:
+            generator.api_stats.reset(token)
+        self.assertEqual(slept, [3.0])
+        self.assertEqual(stats.rows(), [["Wiktionary lookup", 2, 1, 0, 1, "50%", "429 ×1"]])
+
+    def test_wikimedia_mp3_downloads_are_paced_one_per_second(self):
+        now = [100.0]
+        slept = []
+        def sleep(seconds):
+            slept.append(round(seconds, 2))
+            now[0] += seconds
+        mp3 = FakeResponse(None)
+        mp3.read = lambda size=-1: b"ID3sample"
+        def opener(request, timeout=None):
+            now[0] += 0.2  # each download takes a little time
+            return mp3
+        audio = lambda name: {"url": f"https://upload.wikimedia.org/{name}.mp3", "filename": f"{name}.mp3"}
+        with patch.object(generator.time, "monotonic", new=lambda: now[0]), patch.object(generator, "_wikimedia_next", 0.0):
+            for name in ("a", "b", "c"):
+                generator.download_audio(audio(name), self.data, sleep=sleep, opener=opener)
+            generator.download_audio({"url": "https://translate.googleapis.com/x.mp3", "filename": "x.mp3"}, self.data, sleep=sleep, opener=opener)
+        # Wikimedia refuses bursts, so its files wait for each other; Google TTS doesn't wait.
+        self.assertEqual(slept, [0.8, 0.8])
+
     def test_audio_rate_limits_retry_with_smaller_batches(self):
         original = generator.wiktionary_audio
         attempts = {}
@@ -360,6 +405,8 @@ class WebFlow(unittest.TestCase):
                                          [3, "as well as", None, "táo", "apples (n)", "I ate an apple."]])
             self.assertTrue(all(row[1] is None for row in rows[4:]))
             practice = [[cell.value for cell in row] for row in workbook["Reverse"].iter_rows()]
+            api = [[cell.value for cell in row] for row in workbook["API"].iter_rows()]
+            self.assertEqual(api[0], ["API", "Calls", "Success", "No result", "Errors", "Success rate", "Error details"])
             self.assertEqual(practice, [["No", "Sentence", "Keyword"], [1, "I ate an ____ (táo).", "apple (n)"],
                                         [2, "____ & Co. makes phones (hãng).", "apple (n)"], [3, "Tea ____ coffee.", "as well as"]])
             with zipfile.ZipFile(result) as package:
