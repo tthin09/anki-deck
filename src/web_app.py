@@ -312,7 +312,7 @@ def queue(user: str, run, **fields) -> str:
     """Start a research or conversion job; one runs per browser at a time. Call with `lock` held."""
     active = pending.get(user) or workers.get(user)
     if active and active["state"] not in {"done", "failed"} and not cancelled(active):
-        raise HTTPException(409, "A conversion is already running. Please wait.")
+        raise HTTPException(409, "A search or conversion is already running. Please wait.")
     if active:
         finish(active, "cancelled")
     job_id = uuid4().hex

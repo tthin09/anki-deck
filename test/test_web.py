@@ -449,7 +449,13 @@ class CardGeneration(unittest.TestCase):
         llm.research = {"entries": llm.research["entries"][:3]}
         with patch.object(generator, "urlopen", new=llm), self.assertRaisesRegex(RuntimeError, "không trả về đủ"):
             generator.research_entries(["recieve", "As well as", "fine", "asdfgh"], "Research prompt", self.config)
-        llm.research = {"entries": [{"input": "fine", "entry": "fine", "corrected": False, "senses": [sense("n/v", "x")]}]}
+        # One bad sense is dropped instead of failing the whole research.
+        llm.research = {"entries": [{"input": "fine", "entry": "fine", "corrected": False,
+                                     "senses": [sense("", "x"), sense("n", "tiền phạt"), sense("v", "")]}]}
+        with patch.object(generator, "urlopen", new=llm):
+            result = generator.research_entries(["fine"], "Research prompt", self.config)
+        self.assertEqual([s["part_of_speech"] for s in result[0]["senses"]], ["n"])
+        llm.research = {"entries": [{"input": "fine", "entry": "fine", "corrected": False, "senses": "none"}]}
         with patch.object(generator, "urlopen", new=llm), self.assertRaisesRegex(RuntimeError, "không hợp lệ"):
             generator.research_entries(["fine"], "Research prompt", self.config)
 
@@ -501,6 +507,17 @@ class CardGeneration(unittest.TestCase):
         cards, practice, _ = self.generate(llm, (phrase,))
         self.assertEqual((cards[0]["part_of_speech"], cards[0]["ipa"], cards[0]["word_forms"]), ("", "", ""))
         self.assertEqual(practice[0]["back"], "as well as")
+
+    def test_card_example_must_differ_from_the_research_example(self):
+        llm = FakeLLM()
+        llm.cards = {**CARD, "example_sentence": "We like it."}
+        with self.assertRaisesRegex(RuntimeError, "trùng câu ví dụ"):
+            self.generate(llm)
+        tea = {**LIKE, "example_sentence": "Tea &amp; <b>like</b> it."}
+        llm = FakeLLM()
+        llm.cards = {**CARD, "example_sentence": "Tea & like it."}
+        with self.assertRaisesRegex(RuntimeError, "trùng câu ví dụ"):
+            self.generate(llm, (tea,))
 
     def test_practice_sentence_must_differ_from_the_research_example(self):
         llm = FakeLLM()

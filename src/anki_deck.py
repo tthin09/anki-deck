@@ -556,14 +556,16 @@ def validate_research(entries: list[str], data: dict) -> list[dict]:
             # a correction that only changes letter case is not a typo
             corrected = item["corrected"] is True and 0 < len(entry) <= 50 and entry.casefold() != typed.casefold()
             entry = entry if corrected else typed
+            if not isinstance(item["senses"], list):
+                raise ValueError(entry)
             senses = []
             for sense in item["senses"][:RESEARCH_MAX_SENSES]:
                 part = "" if is_phrase(entry) else sense["part_of_speech"]
                 meaning, example = str(sense["vietnamese_meaning"]).strip(), str(sense["example_sentence"]).strip()
-                if (part not in WORD_PARTS_OF_SPEECH and not is_phrase(entry)) or not meaning or not example:
-                    raise ValueError(entry)
-                senses.append({"part_of_speech": part, "vietnamese_meaning": meaning,
-                               "example_sentence": sanitize_card_html(example)})
+                # one bad sense is dropped, so a slip on one word doesn't fail the whole list
+                if (part in WORD_PARTS_OF_SPEECH or is_phrase(entry)) and meaning and example:
+                    senses.append({"part_of_speech": part, "vietnamese_meaning": meaning,
+                                   "example_sentence": sanitize_card_html(example)})
         except (KeyError, TypeError, ValueError, AttributeError) as exc:
             raise RuntimeError(f"AI trả về nghĩa không hợp lệ cho '{typed}'. Hãy thử lại.") from exc
         results.append({"input": typed, "entry": entry, "corrected": corrected, "senses": senses})
@@ -571,7 +573,7 @@ def validate_research(entries: list[str], data: dict) -> list[dict]:
 
 
 def plain(html_text: str) -> str:
-    return re.sub(r"<[^>]+>", "", html_text)
+    return html.unescape(re.sub(r"<[^>]+>", "", html_text))
 
 
 def llm_cards(senses: list[dict], prompt: str, config: dict) -> list[dict]:
@@ -604,6 +606,8 @@ def validate_card(card: dict, sense: dict) -> dict:
         raise RuntimeError(f"AI trả về thẻ cho từ khác thay vì '{entry}'. Chưa tạo bộ thẻ.")
     if card["part_of_speech"] != sense["part_of_speech"]:
         raise RuntimeError(f"AI trả về thẻ sai từ loại cho '{entry}'. Chưa tạo bộ thẻ.")
+    if normalize_sentence(str(card["example_sentence"])) == normalize_sentence(sense["example_sentence"]):
+        raise RuntimeError(f"AI trả về thẻ trùng câu ví dụ đã xem cho '{entry}'. Chưa tạo bộ thẻ.")
     validated = {key: card[key] for key in required}
     validated["word"] = entry
     if is_phrase(entry):
@@ -612,7 +616,7 @@ def validate_card(card: dict, sense: dict) -> dict:
 
 
 def normalize_sentence(text: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"</?(?:str|b)>", "", text).strip()).casefold()
+    return re.sub(r"\s+", " ", plain(text).strip()).casefold()
 
 
 def answer_text(sentence: str) -> str:
@@ -664,7 +668,7 @@ def validate_practice_cards(cards: list[dict], senses: list[dict], data: dict) -
 def verified_pair(card: dict, practice: dict, sense: dict, fix: dict | None) -> tuple[dict, dict]:
     """Take the verification's correction only if it is still a valid card pair for the same sense."""
     try:
-        new_card = validate_card(fix["card"], {"entry": card["word"], "part_of_speech": card["part_of_speech"]})
+        new_card = validate_card(fix["card"], {**sense, "entry": card["word"]})
         if new_card["vietnamese_meaning"] != card["vietnamese_meaning"]:
             return card, practice
         # the front shows the part of speech too; a fix that relabels only one of them is rejected
@@ -781,8 +785,8 @@ def generate_cards(
         with timed_step(f"Dùng AI tạo thẻ từ vựng, đợt {index}/{len(batches)} ({len(batch)} từ)"):
             all_cards.extend(llm_cards(batch, prompt, config))
     all_practice: list[dict] = []
-    for index, start in enumerate(range(0, len(senses), size), start=1):
-        with timed_step(f"Dùng AI tạo thẻ luyện tập, đợt {index}/{len(batches)} ({len(batches[index - 1])} từ)"):
-            all_practice.extend(llm_practice_cards(all_cards[start:start + size], senses[start:start + size], reverse_prompt, config))
+    for index, (cards, batch) in enumerate(zip(chunks(all_cards, size), batches), start=1):
+        with timed_step(f"Dùng AI tạo thẻ luyện tập, đợt {index}/{len(batches)} ({len(batch)} từ)"):
+            all_practice.extend(llm_practice_cards(cards, batch, reverse_prompt, config))
     verify_cards(all_cards, all_practice, senses, verify_prompt, config)
     return all_cards, [make_reverse_note(card, practice) for card, practice in zip(all_cards, all_practice)]
