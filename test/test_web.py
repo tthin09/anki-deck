@@ -136,10 +136,15 @@ class WebFlow(unittest.TestCase):
         # Preview keeps the valid entries and names the bad line; research refuses the whole input.
         preview = self.client.post("/api/preview", json={"text": "apple\n" + "x" * 51}).json()
         self.assertEqual(preview["words"], ["apple"])
-        self.assertIn("Line 2", preview["error"])
+        self.assertEqual(preview["error"], "Lỗi do người dùng: Dòng 2 dài quá 50 ký tự. Mỗi dòng chỉ ghi một từ hoặc một cụm từ.")
         response = self.client.post("/api/research", json={"text": "apple\n" + "x" * 51})
         self.assertEqual(response.status_code, 422)
-        self.assertIn("Line 2", response.json()["detail"])
+        self.assertEqual(response.json()["detail"], preview["error"])
+        for text in ("  ", "\n".join(f"word{i}" for i in range(101))):
+            self.assertTrue(self.client.post("/api/research", json={"text": text}).json()["detail"].startswith("Lỗi do người dùng: "))
+        too_big = self.client.post("/api/research", json={"text": "x" * 9000})
+        self.assertEqual(too_big.status_code, 413)
+        self.assertTrue(too_big.json()["detail"].startswith("Lỗi do người dùng: "))
         # Phrases are entries; inner whitespace collapses to one space, so these are the same entry.
         preview = self.client.post("/api/preview", json={"text": "as well  as\nAs\u00a0well as\nexcessive amount"}).json()
         self.assertEqual(preview, {"words": ["as well as", "excessive amount"], "count": 2, "error": ""})
@@ -178,8 +183,11 @@ class WebFlow(unittest.TestCase):
         # Conversion is refused for bad choices and for other browsers' research.
         for chosen in ([], [[0, 2]], [[2, 0]], [[-1, 0]]):
             self.assertEqual(self.client.post("/api/jobs", json={"research": research_id, "senses": chosen}).status_code, 422)
+        # Someone else's research, or one lost to expiry or a server restart, has to be searched again.
         with TestClient(web.app) as bob:
-            self.assertEqual(bob.post("/api/jobs", json={"research": research_id, "senses": [[0, 0]]}).status_code, 404)
+            expired = bob.post("/api/jobs", json={"research": research_id, "senses": [[0, 0]]})
+            self.assertEqual(expired.status_code, 410)
+            self.assertTrue(expired.json()["detail"].startswith("Lỗi do hệ thống: "))
         with patch.dict(os.environ, {"GEMINI_API_KEY": "secret"}), patch.object(web, "generate_package", fake_generate):
             job_id = self.client.post("/api/jobs", json={"research": research_id, "senses": [[0, 1], [1, 0], [0, 1]]}).json()["id"]
             with self.client.stream("GET", f"/api/jobs/{job_id}/events") as response:
@@ -227,7 +235,7 @@ class WebFlow(unittest.TestCase):
                 self.assertEqual(self.client.post("/api/research", json={"text": "apple"}).status_code, 409)
                 response = self.client.post("/api/jobs", json=chosen["duplicate"])
                 self.assertEqual(response.status_code, 409)
-                self.assertIn("already running", response.json()["detail"])
+                self.assertTrue(response.json()["detail"].startswith("Lỗi do người dùng: "))
                 with TestClient(web.app) as bob:
                     self.assertEqual(bob.post(f"/api/jobs/{first}/cancel").status_code, 404)
                     self.assertEqual(bob.post(f"/api/jobs/{first}/heartbeat").status_code, 404)

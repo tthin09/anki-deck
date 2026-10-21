@@ -24,7 +24,7 @@ function node(fields = {}) {
   }
 }
 
-async function page() {
+async function page(failures = {}) {
   const elements = new Map(), handlers = {}, calls = [], streams = [], intervals = new Map()
   const element = key => {
     if (!elements.has(key)) elements.set(key, node({ value: 'apple' }))
@@ -38,6 +38,7 @@ async function page() {
     navigator: { sendBeacon: url => { calls.push(['beacon', url]); return true } },
     fetch: async (url, options = {}) => {
       calls.push([options.method ?? 'GET', url, options.body])
+      if (failures[url]) return { ok: false, status: failures[url].status, json: async () => ({ detail: failures[url].detail }) }
       const data = url === '/api/preview' ? { words: ['apple'], count: 1, error: '' }
         : ['/api/research', '/api/jobs'].includes(url) ? { id: `job${++nextJob}` }
         : url.endsWith('/heartbeat') ? { state: 'running' } : { ok: true }
@@ -78,7 +79,7 @@ assert.equal(storage.get('conversion'), 'job2')
 await refreshed.streams[0].onmessage({ data: JSON.stringify({ type: 'cancelled' }) })
 assert.equal(storage.has('conversion'), false)
 assert.equal(refreshed.elements.get('#convert').textContent, 'Tìm từ')
-assert.match(refreshed.elements.get('#error').textContent, /Cancelled/)
+assert.match(refreshed.elements.get('#error').textContent, /^Lỗi do hệ thống: Mất kết nối/)
 
 // Picking: the first sense of each entry starts selected; only selected senses are converted.
 const picking = await page()
@@ -117,7 +118,18 @@ const [, , body] = picking.calls.find(([, url]) => url === '/api/jobs')
 assert.deepEqual(JSON.parse(body), { research: 'job3', senses: [[0, 0], [0, 1]] })
 await picking.streams[1].onmessage({ data: JSON.stringify({ type: 'failed' }) })
 assert.equal(convert.textContent, 'Tạo bộ thẻ')
+assert.match(picking.elements.get('#error').textContent, /^Lỗi do hệ thống: Dịch vụ AI/)
 picking.elements.get('#edit').onclick()
 assert.equal(convert.textContent, 'Tìm từ')
 assert.equal(picking.elements.get('#editor').readOnly, false)
+
+// Research lost to expiry or a server restart: back to the input step with the server's message.
+const expired = await page({ '/api/jobs': { status: 410, detail: 'Lỗi do hệ thống: Kết quả tìm từ đã hết hạn.' } })
+await expired.elements.get('#convert').onclick()
+await expired.streams[0].onmessage({ data: JSON.stringify({ type: 'done', percent: 100, result: [
+  { input: 'fine', entry: 'fine', corrected: false, senses: [sense('adj', 'ổn')] }] }) })
+await expired.elements.get('#convert').onclick()
+assert.equal(expired.elements.get('#convert').textContent, 'Tìm từ')
+assert.equal(expired.elements.get('#editor').readOnly, false)
+assert.equal(expired.elements.get('#error').textContent, 'Lỗi do hệ thống: Kết quả tìm từ đã hết hạn.')
 console.log('Frontend research, picking, cancellation, and heartbeat checks passed')

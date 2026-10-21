@@ -23,6 +23,10 @@ from anki_deck import ConversionCancelled, cancellation_check, generate_package,
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.environ.get("ANKI_DATA_DIR", str(ROOT / "data")))
 CLIENT_AGE = 365 * 24 * 60 * 60
+# Every message a learner can see says whose fault it is, in Vietnamese.
+USER_ERROR = "Lỗi do người dùng: "
+SYSTEM_ERROR = "Lỗi do hệ thống: "
+TOO_LONG = USER_ERROR + "Danh sách quá dài. Hãy chia thành nhiều lần, mỗi lần tối đa 100 từ."
 jobs: dict[str, dict] = {}
 workers: dict[str, dict] = {}
 pending: dict[str, dict] = {}
@@ -45,7 +49,7 @@ class APIBodyLimit:
                 return
             chunk = message.get("body", b"")
             if len(body) + len(chunk) >= 8192:
-                response = JSONResponse({"detail": "Request body must be fewer than 8192 bytes"}, status_code=413)
+                response = JSONResponse({"detail": TOO_LONG}, status_code=413)
                 return await response(scope, receive, send)
             body.extend(chunk)
             if not message.get("more_body", False):
@@ -75,7 +79,7 @@ def parse(text: str) -> tuple[list[str], list[str]]:
     rows (tab-separated: the "Word" column if a header names it, else the first non-number cell).
     """
     if len(text.encode("utf-8")) >= 8192:
-        raise HTTPException(422, "Input is too large")
+        raise HTTPException(422, TOO_LONG)
     lines = text.splitlines()
     column = None
     for index, line in enumerate(lines):
@@ -98,7 +102,7 @@ def parse(text: str) -> tuple[list[str], list[str]]:
         for item in re.split(r"[,;]", LIST_MARKER.sub("", line.strip())):
             word = " ".join(item.split())
             if len(word) > 50:
-                errors.append(f"Line {number}: a word or phrase must be at most 50 characters")
+                errors.append(f"{USER_ERROR}Dòng {number} dài quá 50 ký tự. Mỗi dòng chỉ ghi một từ hoặc một cụm từ.")
             elif word and word.casefold() not in seen:
                 seen.add(word.casefold())
                 words.append(word)
@@ -110,9 +114,9 @@ def vocabulary(text: str) -> list[str]:
     if errors:
         raise HTTPException(422, errors[0])
     if not words:
-        raise HTTPException(422, "Enter at least one word")
+        raise HTTPException(422, USER_ERROR + "Hãy nhập ít nhất một từ.")
     if len(words) > 100:
-        raise HTTPException(422, "Maximum 100 unique words")
+        raise HTTPException(422, USER_ERROR + "Tối đa 100 từ mỗi lần. Hãy bớt từ hoặc chia thành nhiều lần.")
     return words
 
 
@@ -139,7 +143,7 @@ def job_for(job_id: str, user: str) -> dict:
     with lock:
         job = jobs.get(job_id)
         if not job or job["user"] != user or job["created"] + 3600 < time.time():
-            raise HTTPException(404, "Conversion not found")
+            raise HTTPException(404, SYSTEM_ERROR + "Không tìm thấy lượt chạy này, có thể hệ thống vừa khởi động lại. Hãy thử lại.")
         return job
 
 
@@ -312,7 +316,8 @@ def queue(user: str, run, **fields) -> str:
     """Start a research or conversion job; one runs per browser at a time. Call with `lock` held."""
     active = pending.get(user) or workers.get(user)
     if active and active["state"] not in {"done", "failed"} and not cancelled(active):
-        raise HTTPException(409, "A search or conversion is already running. Please wait.")
+        raise HTTPException(409, USER_ERROR + "Đang có một lượt tìm từ hoặc tạo bộ thẻ khác chạy, có thể ở tab khác. "
+                                 "Hãy đợi lượt đó xong rồi thử lại.")
     if active:
         finish(active, "cancelled")
     job_id = uuid4().hex
@@ -349,13 +354,18 @@ def start_research(data: Input, response: Response, session: str | None = Cookie
 @app.post("/api/jobs", status_code=202)
 def start(data: Choice, response: Response, session: str | None = Cookie(default=None)):
     user = current_user(response, session)
-    found = job_for(data.research, user).get("result")
+    try:
+        found = job_for(data.research, user).get("result")
+    except HTTPException:
+        found = None
     if found is None:
-        raise HTTPException(409, "Research has not finished")
+        # research lives in memory: it is gone after an hour or a server restart
+        raise HTTPException(410, SYSTEM_ERROR + "Kết quả tìm từ đã hết hạn hoặc hệ thống vừa khởi động lại. "
+                                 "Hãy bấm Tìm từ để tìm lại.")
     senses = []
     for entry, sense in dict.fromkeys(data.senses):
         if not (0 <= entry < len(found) and 0 <= sense < len(found[entry]["senses"])):
-            raise HTTPException(422, "Unknown sense")
+            raise HTTPException(422, SYSTEM_ERROR + "Nghĩa đã chọn không còn hợp lệ. Hãy bấm Tìm từ để tìm lại.")
         senses.append({"entry": found[entry]["entry"], **found[entry]["senses"][sense]})
     started = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh"))
     with lock:
@@ -415,7 +425,7 @@ def download(job_id: str, response: Response, session: str | None = Cookie(defau
     job = job_for(job_id, current_user(response, session))
     with lock:
         if not job["file"] or job["downloaded"]:
-            raise HTTPException(404, "Package unavailable")
+            raise HTTPException(404, SYSTEM_ERROR + "Không tải được bộ thẻ. Hãy bấm Tạo bộ thẻ lần nữa.")
         job["downloaded"] = True
         return FileResponse(job["file"], media_type="application/octet-stream", filename=job["file"].name)
 

@@ -22,12 +22,23 @@ window.addEventListener('pagehide', () => {
     activeStream?.close()
   }
 })
+// Every message a learner can see says whose fault it is, in Vietnamese; the server's messages already do.
+const USER_ERROR = 'Lỗi do người dùng: ', SYSTEM_ERROR = 'Lỗi do hệ thống: '
+const CONNECTION_LOST = SYSTEM_ERROR + 'Mất kết nối với máy chủ nên lượt chạy đã dừng. Hãy kiểm tra mạng rồi thử lại.'
+const FAILED = SYSTEM_ERROR + 'Dịch vụ AI hoặc máy chủ đang gặp sự cố, không phải do bạn. Hãy thử lại sau ít phút.'
+
 async function api(url, options = {}) {
-  const response = await fetch(url, { ...options, headers: { 'Content-Type': 'application/json', ...options.headers } })
+  let response
+  try {
+    response = await fetch(url, { ...options, headers: { 'Content-Type': 'application/json', ...options.headers } })
+  } catch {
+    throw Error(SYSTEM_ERROR + 'Không kết nối được tới máy chủ. Hãy kiểm tra mạng rồi thử lại.')
+  }
   if (!response.ok) {
     let body = {}
     try { body = await response.json() } catch {}
-    throw Error(typeof body.detail === 'string' ? body.detail : `Request failed (${response.status})`)
+    const message = typeof body.detail === 'string' ? body.detail : `${SYSTEM_ERROR}Máy chủ trả lỗi (mã ${response.status}). Hãy tải lại trang rồi thử lại.`
+    throw Object.assign(Error(message), { status: response.status })
   }
   return response
 }
@@ -67,7 +78,7 @@ function showEditor() {
         if (current !== revision) return
         setCount(result.count)
         showCards(result.words)
-        error.textContent = result.error || (count > 100 ? 'Maximum 100 unique words' : message)
+        error.textContent = result.error || (count > 100 ? USER_ERROR + 'Tối đa 100 từ mỗi lần. Hãy bớt từ hoặc chia thành nhiều lần.' : message)
         convert.disabled = busy || !count || count > 100 || !!result.error
       } catch (err) {
         if (current !== revision) return
@@ -158,22 +169,22 @@ function showEditor() {
     link.click()
     setTimeout(() => URL.revokeObjectURL(url), 60000)
   }
-  // Runs a research or conversion job; after(ok, message) restores the screen when it ends.
+  // Runs a research or conversion job; after(ok, message, status) restores the screen when it ends.
   const runJob = async (url, payload, working, onDone, after) => {
     busy = true; app.dataset.busy = true; editor.readOnly = true; edit.disabled = true; document.querySelector('.build-log').open = true; app.style.setProperty('--p', 5); convert.disabled = true; bar.value = 5; log.textContent = ''; error.textContent = ''
     convert.textContent = working
-    const finish = (ok, message) => {
+    const finish = (ok, message, status) => {
       stopTracking()
       busy = false
       app.dataset.busy = false
       edit.disabled = false
-      after(ok, message)
+      after(ok, message, status)
       error.textContent = message
     }
     try {
       await recovery
       const body = JSON.stringify(payload)
-      if (new TextEncoder().encode(body).length >= 8192) throw Error('Request body must be fewer than 8192 bytes')
+      if (new TextEncoder().encode(body).length >= 8192) throw Error(USER_ERROR + 'Danh sách quá dài. Hãy chia thành nhiều lần, mỗi lần tối đa 100 từ.')
       const response = await api(url, { method: 'POST', body })
       const { id } = await response.json()
       activeJob = id
@@ -182,11 +193,11 @@ function showEditor() {
       heartbeatTimer = setInterval(async () => {
         try {
           const state = await (await api(`/api/jobs/${id}/heartbeat`, { method: 'POST' })).json()
-          if (activeJob === id && state.state === 'cancelled') finish(false, 'Cancelled. You can try again.')
+          if (activeJob === id && state.state === 'cancelled') finish(false, CONNECTION_LOST)
         } catch {
           if (activeJob === id) {
             api(`/api/jobs/${id}/cancel`, { method: 'POST' }).catch(() => {})
-            finish(false, 'Connection lost. Cancelled.')
+            finish(false, CONNECTION_LOST)
           }
         }
       }, 5000)
@@ -196,8 +207,8 @@ function showEditor() {
         bar.value = status.percent ?? bar.value
         app.style.setProperty('--p', bar.value)
         if (status.type === 'line') { log.textContent += `${status.text}\n`; log.scrollTop = log.scrollHeight }
-        if (status.type === 'failed') finish(false, 'Failed. Try again.')
-        if (status.type === 'cancelled') finish(false, 'Cancelled. You can try again.')
+        if (status.type === 'failed') finish(false, FAILED)
+        if (status.type === 'cancelled') finish(false, CONNECTION_LOST)
         if (status.type === 'done') {
           stream.close()
           let message = ''
@@ -208,9 +219,9 @@ function showEditor() {
       stream.onerror = () => {
         if (activeJob !== id) return
         api(`/api/jobs/${id}/cancel`, { method: 'POST' }).catch(() => {})
-        finish(false, 'Connection lost. Cancelled. Try again.')
+        finish(false, CONNECTION_LOST)
       }
-    } catch (err) { finish(false, err.message) }
+    } catch (err) { finish(false, err.message, err.status) }
   }
   editor.oninput = () => update()
   editor.ondragover = event => { event.preventDefault() }
@@ -218,12 +229,12 @@ function showEditor() {
     event.preventDefault()
     if (editor.readOnly) return
     const file = event.dataTransfer.files[0]
-    if (!file || !file.name.toLowerCase().endsWith('.txt')) { error.textContent = 'Drop a .txt file'; return }
-    if (file.size >= 8192) { error.textContent = 'Input is too large'; return }
+    if (!file || !file.name.toLowerCase().endsWith('.txt')) { error.textContent = USER_ERROR + 'Chỉ nhận file .txt (file Notepad).'; return }
+    if (file.size >= 8192) { error.textContent = USER_ERROR + 'File quá dài. Hãy chia thành nhiều file, mỗi file tối đa 100 từ.'; return }
     try {
       editor.value = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer())
       update()
-    } catch { error.textContent = 'File must be UTF-8' }
+    } catch { error.textContent = USER_ERROR + 'Không đọc được file. Hãy lưu file Notepad với mã hoá UTF-8 rồi thử lại.' }
   }
   edit.onclick = () => { if (!busy) toInput() }
   convert.onclick = () => {
@@ -237,7 +248,8 @@ function showEditor() {
     chosen.forEach((card, i) => card.node.style.setProperty('--i', i))
     preview.style.setProperty('--n', chosen.length)
     return runJob('/api/jobs', { research: research.id, senses: chosen.map(card => card.key.split(',').map(Number)) },
-      'Đang tạo…', download, () => toPicking())
+      // 410: the research is gone (expired or the server restarted), so the learner has to search again
+      'Đang tạo…', download, (ok, message, status) => status === 410 ? toInput(message) : toPicking())
   }
   update()
 }
