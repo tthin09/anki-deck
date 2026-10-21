@@ -20,6 +20,33 @@ import web_app as web
 import anki_deck as generator
 
 
+def fake_research(words, prompt, config):
+    return [{"input": word, "entry": word, "corrected": False,
+             "senses": [{"part_of_speech": "n", "vietnamese_meaning": "nghĩa", "example_sentence": f"A <b>{word}</b>."}]}
+            for word in words]
+
+
+def research(client, text, researcher=fake_research):
+    """Run research to completion and return (job id, done event)."""
+    with patch.dict(os.environ, {"GEMINI_API_KEY": "secret"}), patch.object(web, "research_entries", researcher):
+        response = client.post("/api/research", json={"text": text})
+        assert response.status_code == 202, response.text
+        job_id = response.json()["id"]
+        with client.stream("GET", f"/api/jobs/{job_id}/events") as stream:
+            events = [json.loads(line[6:]) for line in stream.iter_lines() if line.startswith("data: ")]
+    return job_id, events[-1]
+
+
+def convert(client, text):
+    """Research `text` and convert the first sense of every entry."""
+    research_id, done = research(client, text)
+    return client.post("/api/jobs", json={"research": research_id, "senses": [[i, 0] for i in range(len(done["result"]))]})
+
+
+def entries(senses):
+    return [sense["entry"] for sense in senses]
+
+
 class WebFlow(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -40,17 +67,17 @@ class WebFlow(unittest.TestCase):
         self.assertEqual(len(self.client.post("/api/preview", json={"text": "apple"}).cookies["session"]), 43)
         self.assertEqual(self.client.post("/api/preview", json={"text": " Apple \nbook\napple\n\nStraße\nSTRASSE"}).json(),
                          {"count": 3, "words": ["Apple", "book", "Straße"], "error": ""})
-        self.assertEqual(self.client.post("/api/jobs", json={"text": "  "}).status_code, 422)
+        self.assertEqual(self.client.post("/api/research", json={"text": "  "}).status_code, 422)
         self.assertEqual(self.client.post("/api/preview", json={"text": "\n"}).json()["count"], 0)
         hundred = "\n".join(f"word{i}" for i in range(100))
         self.assertEqual(self.client.post("/api/preview", json={"text": hundred}).json()["count"], 100)
-        self.assertEqual(self.client.post("/api/jobs", json={"text": hundred + "\nword100"}).status_code, 422)
-        self.assertEqual(self.client.post("/api/jobs", json={"text": "x" * 32001}).status_code, 413)
+        self.assertEqual(self.client.post("/api/research", json={"text": hundred + "\nword100"}).status_code, 422)
+        self.assertEqual(self.client.post("/api/research", json={"text": "x" * 32001}).status_code, 413)
         self.assertEqual(self.client.post("/api/preview", json={"text": "😀" * 8100}).status_code, 413)
 
     def test_conversion_history_progress_ownership_and_one_download(self):
-        def fake_generate(root, config, words, output):
-            self.assertEqual(words, ["Apple", "book"])
+        def fake_generate(root, config, senses, output):
+            self.assertEqual(entries(senses), ["Apple", "book"])
             web.msg("Đang chạy", "Dùng AI tạo thẻ từ vựng")
             web.msg("Đang chạy", "Lấy audio")
             web.msg("Đang chạy", "Đóng gói")
@@ -58,7 +85,7 @@ class WebFlow(unittest.TestCase):
             return output
 
         with patch.dict(os.environ, {"GEMINI_API_KEY": "secret"}), patch.object(web, "generate_package", fake_generate):
-            job = self.client.post("/api/jobs", json={"text": "Apple\nbook\napple"})
+            job = convert(self.client, "Apple\nbook\napple")
             self.assertEqual(job.status_code, 202)
             job_id = job.json()["id"]
             # Other browsers cannot observe events or download this browser's package.
@@ -83,15 +110,15 @@ class WebFlow(unittest.TestCase):
                 rows = list(csv.DictReader(file))
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["uploader"], self.client.cookies["session"])
-            self.assertEqual(json.loads(rows[0]["words"]), ["Apple", "book"])
+            self.assertEqual(json.loads(rows[0]["words"]), ["Apple (n)", "book (n)"])
             self.assertEqual(rows[0]["filename"], result.headers["content-disposition"].split('filename="')[1].split('"')[0])
 
     def test_parallel_conversions_keep_distinct_packages_and_csv_rows(self):
-        def fake_generate(root, config, words, output):
-            output.write_bytes(words[0].encode())
+        def fake_generate(root, config, senses, output):
+            output.write_bytes(senses[0]["entry"].encode())
         with patch.dict(os.environ, {"GEMINI_API_KEY": "secret"}), patch.object(web, "generate_package", fake_generate), TestClient(web.app) as bob:
             clients = (self.client, bob)
-            ids = [client.post("/api/jobs", json={"text": word}).json()["id"] for client, word in zip(clients, ("apple", "book"))]
+            ids = [convert(client, word).json()["id"] for client, word in zip(clients, ("apple", "book"))]
             for client, job_id in zip(clients, ids):
                 with client.stream("GET", f"/api/jobs/{job_id}/events") as response:
                     self.assertIn('"type": "done"', "".join(response.iter_text()))
@@ -100,20 +127,22 @@ class WebFlow(unittest.TestCase):
         with (self.data / "history" / "conversions.csv").open(encoding="utf-8", newline="") as file:
             self.assertEqual(len(list(csv.DictReader(file))), 2)
 
-    def test_body_limit_and_single_word_rules(self):
+    def test_body_limit_and_entry_rules(self):
         body = json.dumps({"text": "apple"}).encode()
         allowed = body + b" " * (8191 - len(body))
         self.assertEqual(self.client.post("/api/preview", content=allowed, headers={"Content-Type": "application/json"}).status_code, 200)
         for path in ("/api/preview", "/api/jobs"):
             self.assertEqual(self.client.post(path, content=allowed + b" ").status_code, 413)
-        for word in ("two words", "two\u00a0words", "x" * 51):
-            # Preview keeps the valid words and names the bad line; conversion refuses the whole input.
-            preview = self.client.post("/api/preview", json={"text": "apple\n" + word}).json()
-            self.assertEqual(preview["words"], ["apple"])
-            self.assertIn("Line 2", preview["error"])
-            response = self.client.post("/api/jobs", json={"text": "apple\n" + word})
-            self.assertEqual(response.status_code, 422)
-            self.assertIn("Line 2", response.json()["detail"])
+        # Preview keeps the valid entries and names the bad line; research refuses the whole input.
+        preview = self.client.post("/api/preview", json={"text": "apple\n" + "x" * 51}).json()
+        self.assertEqual(preview["words"], ["apple"])
+        self.assertIn("Line 2", preview["error"])
+        response = self.client.post("/api/research", json={"text": "apple\n" + "x" * 51})
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("Line 2", response.json()["detail"])
+        # Phrases are entries; inner whitespace collapses to one space, so these are the same entry.
+        preview = self.client.post("/api/preview", json={"text": "as well  as\nAs\u00a0well as\nexcessive amount"}).json()
+        self.assertEqual(preview, {"words": ["as well as", "excessive amount"], "count": 2, "error": ""})
         response = self.client.post("/api/preview", json={"text": "  Apple  \n\nAPPLE\n" + "é" * 50})
         self.assertEqual(response.json()["words"], ["Apple", "é" * 50])
 
@@ -130,6 +159,34 @@ class WebFlow(unittest.TestCase):
         }
         for text, words in pastes.items():
             self.assertEqual(self.client.post("/api/preview", json={"text": text}).json(), {"words": words, "count": len(words), "error": ""})
+
+    def test_research_returns_senses_and_conversion_uses_only_chosen_ones(self):
+        def senses_of_fine(words, prompt, config):
+            self.assertEqual(words, ["fine", "as well as"])
+            return [{"input": "fine", "entry": "fine", "corrected": False, "senses": [
+                        {"part_of_speech": "adj", "vietnamese_meaning": "ổn", "example_sentence": "I am <b>fine</b>."},
+                        {"part_of_speech": "n", "vietnamese_meaning": "tiền phạt", "example_sentence": "A parking <b>fine</b>."}]},
+                    {"input": "as well as", "entry": "as well as", "corrected": False, "senses": [
+                        {"part_of_speech": "", "vietnamese_meaning": "cũng như", "example_sentence": "Tea <b>as well as</b> coffee."}]}]
+        received = []
+        def fake_generate(root, config, senses, output):
+            received.extend(senses)
+            output.write_bytes(b"deck")
+        research_id, done = research(self.client, "fine\nas well as", senses_of_fine)
+        self.assertEqual(done["type"], "done")
+        self.assertEqual([len(item["senses"]) for item in done["result"]], [2, 1])
+        # Conversion is refused for bad choices and for other browsers' research.
+        for chosen in ([], [[0, 2]], [[2, 0]], [[-1, 0]]):
+            self.assertEqual(self.client.post("/api/jobs", json={"research": research_id, "senses": chosen}).status_code, 422)
+        with TestClient(web.app) as bob:
+            self.assertEqual(bob.post("/api/jobs", json={"research": research_id, "senses": [[0, 0]]}).status_code, 404)
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "secret"}), patch.object(web, "generate_package", fake_generate):
+            job_id = self.client.post("/api/jobs", json={"research": research_id, "senses": [[0, 1], [1, 0], [0, 1]]}).json()["id"]
+            with self.client.stream("GET", f"/api/jobs/{job_id}/events") as response:
+                self.assertIn('"type": "done"', "".join(response.iter_text()))
+        self.assertEqual(received, [
+            {"entry": "fine", "part_of_speech": "n", "vietnamese_meaning": "tiền phạt", "example_sentence": "A parking <b>fine</b>."},
+            {"entry": "as well as", "part_of_speech": "", "vietnamese_meaning": "cũng như", "example_sentence": "Tea <b>as well as</b> coffee."}])
 
     def test_chunked_body_is_rejected_before_application(self):
         async def exercise():
@@ -150,7 +207,8 @@ class WebFlow(unittest.TestCase):
     def test_cancel_waits_for_provider_and_keeps_only_latest_replacement(self):
         started, release, replacement_started = threading.Event(), threading.Event(), threading.Event()
         calls = []
-        def fake_generate(root, config, words, output):
+        def fake_generate(root, config, senses, output):
+            words = entries(senses)
             calls.append(words[0])
             if words == ["first"]:
                 started.set()
@@ -162,19 +220,22 @@ class WebFlow(unittest.TestCase):
                 output.write_bytes(words[0].encode())
         with patch.dict(os.environ, {"GEMINI_API_KEY": "secret"}), patch.object(web, "generate_package", fake_generate):
             try:
-                first = self.client.post("/api/jobs", json={"text": "first"}).json()["id"]
+                chosen = {word: {"research": research(self.client, word)[0], "senses": [[0, 0]]}
+                          for word in ("first", "second", "third", "duplicate")}
+                first = self.client.post("/api/jobs", json=chosen["first"]).json()["id"]
                 self.assertTrue(started.wait(2))
-                response = self.client.post("/api/jobs", json={"text": "duplicate"})
+                self.assertEqual(self.client.post("/api/research", json={"text": "apple"}).status_code, 409)
+                response = self.client.post("/api/jobs", json=chosen["duplicate"])
                 self.assertEqual(response.status_code, 409)
                 self.assertIn("already running", response.json()["detail"])
                 with TestClient(web.app) as bob:
                     self.assertEqual(bob.post(f"/api/jobs/{first}/cancel").status_code, 404)
                     self.assertEqual(bob.post(f"/api/jobs/{first}/heartbeat").status_code, 404)
                 self.assertEqual(self.client.post(f"/api/jobs/{first}/cancel").status_code, 200)
-                second = self.client.post("/api/jobs", json={"text": "second"}).json()["id"]
-                self.assertEqual(self.client.post("/api/jobs", json={"text": "duplicate"}).status_code, 409)
+                second = self.client.post("/api/jobs", json=chosen["second"]).json()["id"]
+                self.assertEqual(self.client.post("/api/jobs", json=chosen["duplicate"]).status_code, 409)
                 self.client.post(f"/api/jobs/{second}/cancel")
-                third = self.client.post("/api/jobs", json={"text": "third"}).json()["id"]
+                third = self.client.post("/api/jobs", json=chosen["third"]).json()["id"]
                 self.assertEqual(calls, ["first"])
                 release.set()
                 self.assertTrue(replacement_started.wait(2))
@@ -191,13 +252,13 @@ class WebFlow(unittest.TestCase):
 
     def test_missing_heartbeat_cancels_and_cannot_be_revived(self):
         started, release = threading.Event(), threading.Event()
-        def fake_generate(root, config, words, output):
+        def fake_generate(root, config, senses, output):
             started.set()
             release.wait(5)
             generator.check_cancelled()
         with patch.dict(os.environ, {"GEMINI_API_KEY": "secret"}), patch.object(web, "generate_package", fake_generate):
             try:
-                job_id = self.client.post("/api/jobs", json={"text": "apple"}).json()["id"]
+                job_id = convert(self.client, "apple").json()["id"]
                 self.assertTrue(started.wait(2))
                 self.assertEqual(self.client.post(f"/api/jobs/{job_id}/heartbeat").json()["state"], "running")
                 now = time.monotonic()
@@ -279,7 +340,7 @@ class WebFlow(unittest.TestCase):
         def fail(*args):
             raise RuntimeError("secret provider failure")
         with patch.dict(os.environ, {"GEMINI_API_KEY": "secret"}), patch.object(web, "generate_package", fail):
-            job_id = self.client.post("/api/jobs", json={"text": "apple"}).json()["id"]
+            job_id = convert(self.client, "apple").json()["id"]
             with self.client.stream("GET", f"/api/jobs/{job_id}/events") as response:
                 output = "".join(response.iter_text())
             self.assertIn('"type": "failed"', output)
@@ -319,7 +380,7 @@ class FakeLLM:
         stage = None
         if "generativelanguage" in url:
             prompt = body["contents"][0]["parts"][0]["text"].split()[0]
-            stage = "gemini:" + {"Cards": "cards", "Practice": "practice_cards", "Verify": "verification"}[prompt]
+            stage = "gemini:" + {"Cards": "cards", "Practice": "practice_cards", "Verify": "verification", "Research": "research"}[prompt]
         elif self.local_down:
             raise generator.URLError("connection refused")
         elif url.endswith("/v1/models"):
@@ -328,7 +389,9 @@ class FakeLLM:
             stage = body["response_format"]["json_schema"]["name"]
         self.calls.append(stage)
         name = stage.split(":")[-1]
-        if name == "cards":
+        if name == "research":
+            data = self.research
+        elif name == "cards":
             data = {"cards": [self.cards]}
         elif name == "practice_cards":
             data = {"cards": [self.practice]}
@@ -352,6 +415,28 @@ class CardGeneration(unittest.TestCase):
         finally:
             generator.progress_sink.reset(token)
         return cards, practice, lines
+
+    def test_research_corrects_typos_keeps_phrases_untyped_and_caps_senses(self):
+        sense = lambda pos, meaning: {"part_of_speech": pos, "vietnamese_meaning": meaning, "example_sentence": "x <b>y</b> z"}
+        llm = FakeLLM()
+        llm.research = {"entries": [
+            {"input": "recieve", "entry": "receive", "corrected": True, "senses": [sense("v", "nhận")]},
+            {"input": "As well as", "entry": "as well as", "corrected": True, "senses": [sense("conj", "cũng như")]},
+            {"input": "fine", "entry": "fine", "corrected": False, "senses": [sense(pos, str(pos)) for pos in ("adj", "n", "v", "adj", "adv")]},
+            {"input": "asdfgh", "entry": "asdfgh", "corrected": False, "senses": []}]}
+        with patch.object(generator, "urlopen", new=llm):
+            result = generator.research_entries(["recieve", "As well as", "fine", "asdfgh"], "Research prompt", self.config)
+        self.assertEqual([(item["entry"], item["corrected"]) for item in result],
+                         [("receive", True), ("As well as", False), ("fine", False), ("asdfgh", False)])
+        self.assertEqual(result[1]["senses"][0]["part_of_speech"], "")
+        self.assertEqual(len(result[2]["senses"]), 4)
+        self.assertEqual(result[3]["senses"], [])
+        llm.research = {"entries": llm.research["entries"][:3]}
+        with patch.object(generator, "urlopen", new=llm), self.assertRaisesRegex(RuntimeError, "không trả về đủ"):
+            generator.research_entries(["recieve", "As well as", "fine", "asdfgh"], "Research prompt", self.config)
+        llm.research = {"entries": [{"input": "fine", "entry": "fine", "corrected": False, "senses": [sense("n/v", "x")]}]}
+        with patch.object(generator, "urlopen", new=llm), self.assertRaisesRegex(RuntimeError, "không hợp lệ"):
+            generator.research_entries(["fine"], "Research prompt", self.config)
 
     def test_local_llm_down_falls_back_to_gemini(self):
         llm = FakeLLM(local_down=True)

@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from anki_deck import ConversionCancelled, cancellation_check, generate_package, progress_sink, msg
+from anki_deck import ConversionCancelled, cancellation_check, generate_package, progress_sink, msg, research_entries
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.environ.get("ANKI_DATA_DIR", str(ROOT / "data")))
@@ -69,7 +69,7 @@ LIST_MARKER = re.compile(r"^(?:[-*•·–]|\d+[.)])\s+")
 
 
 def parse(text: str) -> tuple[list[str], list[str]]:
-    """Unique words from pasted text, plus one error per bad line.
+    """Unique entries (words or phrases) from pasted text, plus one error per bad line.
 
     Accepts one word per line, comma/semicolon lists, bullet or numbered lists, and spreadsheet
     rows (tab-separated: the "Word" column if a header names it, else the first non-number cell).
@@ -96,11 +96,9 @@ def parse(text: str) -> tuple[list[str], list[str]]:
             else:
                 line = next((cell for cell in cells if cell and not cell.replace(".", "").isdigit()), "")
         for item in re.split(r"[,;]", LIST_MARKER.sub("", line.strip())):
-            word = item.strip()
+            word = " ".join(item.split())
             if len(word) > 50:
-                errors.append(f"Line {number}: a word must be at most 50 characters")
-            elif any(char.isspace() for char in word):
-                errors.append(f'Line {number}: "{word}" has spaces. Enter one word per line; phrases are not supported yet')
+                errors.append(f"Line {number}: a word or phrase must be at most 50 characters")
             elif word and word.casefold() not in seen:
                 seen.add(word.casefold())
                 words.append(word)
@@ -122,6 +120,12 @@ class Input(BaseModel):
     text: str = Field(max_length=8191)
 
 
+class Choice(BaseModel):
+    research: str = Field(max_length=64)
+    # [entry index, sense index] pairs into the research result
+    senses: list[tuple[int, int]] = Field(min_length=1, max_length=400)
+
+
 def current_user(response: Response, session: str | None = Cookie(default=None)) -> str:
     """Anonymous per-browser id; it only keeps one browser's jobs and downloads away from another's."""
     if session and len(session) == 43:
@@ -141,7 +145,10 @@ def job_for(job_id: str, user: str) -> dict:
 
 def progress(job: dict, line: str):
     with job["condition"]:
-        if "Dùng AI tạo thẻ luyện tập" in line:
+        batch = re.search(r"Tìm nghĩa, đợt (\d+)/(\d+)", line)
+        if batch:
+            job["percent"] = 5 + 90 * (int(batch[1]) - 1) // int(batch[2])
+        elif "Dùng AI tạo thẻ luyện tập" in line:
             job["percent"] = 40
         elif "Kiểm tra lại thẻ" in line:
             job["percent"] = 55
@@ -159,7 +166,10 @@ def finish(job: dict, state: str):
             return
         job["state"] = state
         job["lease"].cancel()
-        job["events"].append({"type": state, "percent": 100 if state == "done" else job["percent"]})
+        event = {"type": state, "percent": 100 if state == "done" else job["percent"]}
+        if state == "done" and "result" in job:
+            event["result"] = job["result"]
+        job["events"].append(event)
         job["condition"].notify_all()
 
 
@@ -191,20 +201,44 @@ def check_job(job: dict):
             raise ConversionCancelled()
 
 
+def ai_config() -> dict:
+    return {"gemini_api_key": os.environ["GEMINI_API_KEY"], "model": os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite"),
+            "llm_base_url": os.environ.get("LLM_BASE_URL", "http://localhost:8000"),
+            "deck_name": "English Vocabulary", "chunk_size": 30}
+
+
+def research(job: dict):
+    token = progress_sink.set(lambda line: progress(job, line))
+    cancel_token = cancellation_check.set(lambda: check_job(job))
+    try:
+        prompt = (ROOT / "src" / "research-prompt.md").read_text(encoding="utf-8")
+        check_job(job)
+        result = research_entries(job["words"], prompt, ai_config())
+        with lock:
+            check_job(job)
+            job["result"] = result
+            finish(job, "done")
+    except ConversionCancelled:
+        finish(job, "cancelled")
+    except Exception:
+        progress(job, "[Lỗi      ] Không thể tìm từ. Kiểm tra dịch vụ và thử lại.")
+        finish(job, "failed")
+    finally:
+        cancellation_check.reset(cancel_token)
+        progress_sink.reset(token)
+
+
 def convert(job: dict):
     token = progress_sink.set(lambda line: progress(job, line))
     cancel_token = cancellation_check.set(lambda: check_job(job))
     output = DATA / "history" / job["filename"]
     temporary = output.with_suffix(".apkg.part")
-    words = job["words"]
+    senses = job["senses"]
     try:
-        key = os.environ["GEMINI_API_KEY"]
+        config = ai_config()
         output.parent.mkdir(parents=True, exist_ok=True)
-        config = {"gemini_api_key": key, "model": os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite"),
-                  "llm_base_url": os.environ.get("LLM_BASE_URL", "http://localhost:8000"),
-                  "deck_name": "English Vocabulary", "chunk_size": 30}
         check_job(job)
-        generate_package(ROOT, config, words, temporary)
+        generate_package(ROOT, config, senses, temporary)
         check_job(job)
         with temporary.open("rb") as file:
             os.fsync(file.fileno())
@@ -217,7 +251,9 @@ def convert(job: dict):
                 writer = csv.writer(file)
                 if file.tell() == 0:
                     writer.writerow(["filename", "uploader", "created_utc", "words"])
-                writer.writerow([output.name, job["user"], datetime.now(timezone.utc).isoformat(), json.dumps(words, ensure_ascii=False)])
+                chosen = [f"{sense['entry']} ({sense['part_of_speech']})" if sense["part_of_speech"] else sense["entry"]
+                          for sense in senses]
+                writer.writerow([output.name, job["user"], datetime.now(timezone.utc).isoformat(), json.dumps(chosen, ensure_ascii=False)])
                 file.flush()
                 os.fsync(file.fileno())
             for parent in (output.parent, DATA):
@@ -251,7 +287,7 @@ def run_user(job: dict):
             with lock:
                 check_job(job)
                 job["state"] = "running"
-            convert(job)
+            job["run"](job)
         except ConversionCancelled:
             pass
         except Exception:
@@ -272,40 +308,64 @@ def preview(data: Input, response: Response, session: str | None = Cookie(defaul
     return {"words": words, "count": len(words), "error": errors[0] if errors else ""}
 
 
-@app.post("/api/jobs", status_code=202)
-def start(data: Input, response: Response, session: str | None = Cookie(default=None)):
+def queue(user: str, run, **fields) -> str:
+    """Start a research or conversion job; one runs per browser at a time. Call with `lock` held."""
+    active = pending.get(user) or workers.get(user)
+    if active and active["state"] not in {"done", "failed"} and not cancelled(active):
+        raise HTTPException(409, "A conversion is already running. Please wait.")
+    if active:
+        finish(active, "cancelled")
+    job_id = uuid4().hex
+    job = {"user": user, "created": time.time(), "run": run, "filename": None,
+           "condition": threading.Condition(), "events": [], "percent": 5,
+           "file": None, "downloaded": False, "state": "queued", "heartbeat": time.monotonic(), **fields}
+    jobs[job_id] = job
+    schedule_expiry(job)
+    if user in workers:
+        previous = pending.get(user)
+        if previous:
+            finish(previous, "cancelled")
+        pending[user] = job
+    else:
+        workers[user] = job
+        threading.Thread(target=run_user, args=(job,), daemon=True).start()
+    return job_id
+
+
+def forget_old_jobs():
+    for old_id in [key for key, value in jobs.items() if value["created"] + 3600 < time.time()]:
+        del jobs[old_id]
+
+
+@app.post("/api/research", status_code=202)
+def start_research(data: Input, response: Response, session: str | None = Cookie(default=None)):
     user = current_user(response, session)
     words = vocabulary(data.text)
-    job_id = uuid4().hex
+    with lock:
+        forget_old_jobs()
+        return {"id": queue(user, research, words=words)}
+
+
+@app.post("/api/jobs", status_code=202)
+def start(data: Choice, response: Response, session: str | None = Cookie(default=None)):
+    user = current_user(response, session)
+    found = job_for(data.research, user).get("result")
+    if found is None:
+        raise HTTPException(409, "Research has not finished")
+    senses = []
+    for entry, sense in dict.fromkeys(data.senses):
+        if not (0 <= entry < len(found) and 0 <= sense < len(found[entry]["senses"])):
+            raise HTTPException(422, "Unknown sense")
+        senses.append({"entry": found[entry]["entry"], **found[entry]["senses"][sense]})
     started = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh"))
     with lock:
-        active = pending.get(user) or workers.get(user)
-        if active and active["state"] not in {"done", "failed"} and not cancelled(active):
-            raise HTTPException(409, "A conversion is already running. Please wait.")
-        if active:
-            finish(active, "cancelled")
-        for old_id in [key for key, value in jobs.items() if value["created"] + 3600 < time.time()]:
-            del jobs[old_id]
+        forget_old_jobs()
         filenames = {job["filename"] for job in jobs.values()}
-        filename = f"{started:%d%m%y-%H%M%S}-{len(words)}_words.apkg"
+        filename = f"{started:%d%m%y-%H%M%S}-{len(senses)}_words.apkg"
         while filename in filenames or (DATA / "history" / filename).exists():
             started += timedelta(seconds=1)
-            filename = f"{started:%d%m%y-%H%M%S}-{len(words)}_words.apkg"
-        job = {"user": user, "created": time.time(), "filename": filename,
-               "condition": threading.Condition(), "events": [], "percent": 5,
-               "file": None, "downloaded": False, "words": words,
-               "state": "queued", "heartbeat": time.monotonic()}
-        jobs[job_id] = job
-        schedule_expiry(job)
-        if user in workers:
-            previous = pending.get(user)
-            if previous:
-                finish(previous, "cancelled")
-            pending[user] = job
-        else:
-            workers[user] = job
-            threading.Thread(target=run_user, args=(job,), daemon=True).start()
-    return {"id": job_id}
+            filename = f"{started:%d%m%y-%H%M%S}-{len(senses)}_words.apkg"
+        return {"id": queue(user, convert, filename=filename, senses=senses)}
 
 
 @app.post("/api/jobs/{job_id}/cancel")

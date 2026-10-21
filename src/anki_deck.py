@@ -103,6 +103,40 @@ VERIFY_SCHEMA = {
     },
     "required": ["pairs"],
 }
+WORD_PARTS_OF_SPEECH = ["n", "v", "adj", "adv", "prep", "conj", "pron", "det"]
+RESEARCH_MAX_SENSES = 4
+RESEARCH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "entries": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "input": {"type": "string"},
+                    "entry": {"type": "string"},
+                    "corrected": {"type": "boolean"},
+                    "senses": {
+                        "type": "array",
+                        "maxItems": RESEARCH_MAX_SENSES,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                # empty for a phrase
+                                "part_of_speech": {"type": "string", "enum": [*WORD_PARTS_OF_SPEECH, ""]},
+                                "vietnamese_meaning": {"type": "string"},
+                                "example_sentence": {"type": "string"},
+                            },
+                            "required": ["part_of_speech", "vietnamese_meaning", "example_sentence"],
+                        },
+                    },
+                },
+                "required": ["input", "entry", "corrected", "senses"],
+            },
+        }
+    },
+    "required": ["entries"],
+}
 LLM_TIMEOUT = 180
 VERIFICATION_ROUNDS = 2
 VERIFICATION_CHUNK_SIZE = 10
@@ -495,6 +529,45 @@ def gemini_json(items: list[dict | str], prompt: str, schema: dict, config: dict
         return json.loads(text)
     except (KeyError, IndexError, json.JSONDecodeError) as exc:
         raise RuntimeError("AI trả về dữ liệu không đọc được. Chưa tạo bộ thẻ.") from exc
+
+
+def is_phrase(entry: str) -> bool:
+    return " " in entry.strip()
+
+
+def research_entries(entries: list[str], prompt: str, config: dict) -> list[dict]:
+    """Research: the senses of every entry, in input order, with any typo correction."""
+    results: list[dict] = []
+    batches = chunks(entries, int(config["chunk_size"]))
+    for index, batch in enumerate(batches, start=1):
+        with timed_step(f"Tìm nghĩa, đợt {index}/{len(batches)} ({len(batch)} từ)"):
+            results.extend(validate_research(batch, llm_json(batch, prompt, RESEARCH_SCHEMA, "research", config)))
+    return results
+
+
+def validate_research(entries: list[str], data: dict) -> list[dict]:
+    found = data.get("entries") if isinstance(data, dict) else None
+    if not isinstance(found, list) or len(found) != len(entries):
+        raise RuntimeError("AI không trả về đủ kết quả tìm từ. Hãy thử lại.")
+    results = []
+    for typed, item in zip(entries, found):
+        try:
+            entry = " ".join(str(item["entry"]).split())
+            # a correction that only changes letter case is not a typo
+            corrected = item["corrected"] is True and 0 < len(entry) <= 50 and entry.casefold() != typed.casefold()
+            entry = entry if corrected else typed
+            senses = []
+            for sense in item["senses"][:RESEARCH_MAX_SENSES]:
+                part = "" if is_phrase(entry) else sense["part_of_speech"]
+                meaning, example = str(sense["vietnamese_meaning"]).strip(), str(sense["example_sentence"]).strip()
+                if (part not in WORD_PARTS_OF_SPEECH and not is_phrase(entry)) or not meaning or not example:
+                    raise ValueError(entry)
+                senses.append({"part_of_speech": part, "vietnamese_meaning": meaning,
+                               "example_sentence": sanitize_card_html(example)})
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            raise RuntimeError(f"AI trả về nghĩa không hợp lệ cho '{typed}'. Hãy thử lại.") from exc
+        results.append({"input": typed, "entry": entry, "corrected": corrected, "senses": senses})
+    return results
 
 
 def llm_cards(words: list[str], prompt: str, config: dict) -> list[dict]:
