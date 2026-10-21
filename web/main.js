@@ -115,7 +115,11 @@ function showEditor() {
         if (item.senses.length > 1) { card.classList.add('multi'); card.style.setProperty('--g', g) }
         if (item.corrected) card.classList.add('fixed')
         const tip = el('span', 'tip')
-        if (item.corrected) tip.append(el('span', 'fix', `Bạn ghi nhầm thành ${item.input}, tôi đã tự sửa lại thành ${item.entry}`))
+        if (item.corrected) {
+          const fix = el('span', 'fix')
+          fix.append('Bạn ghi nhầm thành ', el('b', '', item.input), ', tôi đã tự sửa lại thành ', el('b', '', item.entry))
+          tip.append(fix)
+        }
         const example = el('span')
         example.innerHTML = sense.example_sentence  // the server allow-lists <b>, <i> and <br> only
         tip.append(example)
@@ -125,8 +129,9 @@ function showEditor() {
           card.classList.toggle('off', !research.selected.has(key))
           card.setAttribute('aria-pressed', String(research.selected.has(key)))
         }
-        card.onclick = () => {
-          if (busy) return
+        card.onclick = event => {
+          // the hover box sits inside the card; clicking it (e.g. to select text) mustn't toggle the card
+          if (busy || tip.contains(event?.target)) return
           research.selected.has(key) ? research.selected.delete(key) : research.selected.add(key)
           paint()
           setCount(research.selected.size)

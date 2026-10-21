@@ -11,12 +11,13 @@ const tick = () => new Promise(resolve => setImmediate(resolve))
 function node(fields = {}) {
   const classes = new Set()
   return {
-    value: '', textContent: '', disabled: false, hidden: false, dataset: {}, children: [], attributes: {},
+    tagName: '', value: '', textContent: '', disabled: false, hidden: false, dataset: {}, children: [], attributes: {},
     style: { setProperty() {} },
     classList: { add: name => classes.add(name), remove: name => classes.delete(name), contains: name => classes.has(name),
       toggle: (name, on = !classes.has(name)) => { on ? classes.add(name) : classes.delete(name); return on } },
     set className(value) { classes.clear(); value.split(' ').filter(Boolean).forEach(name => classes.add(name)) },
     append(...children) { this.children.push(...children) },
+    contains(other) { return other === this || this.children.some(child => child?.contains?.(other)) },
     replaceChildren(...children) { this.children = children },
     setAttribute(name, value) { this.attributes[name] = value },
     ...fields,
@@ -31,7 +32,7 @@ async function page() {
   }
   const context = {
     console, TextEncoder, TextDecoder, URL,
-    document: { querySelector: element, createElement: () => node() },
+    document: { querySelector: element, createElement: tagName => node({ tagName }) },
     sessionStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
     window: { addEventListener: (type, handler) => { handlers[type] = handler }, location: { reload() {} } },
     navigator: { sendBeacon: url => { calls.push(['beacon', url]); return true } },
@@ -102,7 +103,12 @@ assert.equal(cards[0].children[0].textContent, 'fine (adj)')
 assert.equal(cards[1].classList.contains('off'), true)
 assert.equal(cards[2].classList.contains('missing'), true)
 assert.equal(cards[3].classList.contains('fixed'), true)
-assert.match(cards[3].children[2].children[0].textContent, /Bạn ghi nhầm thành recieve, tôi đã tự sửa lại thành receive/)
+const fix = cards[3].children[2].children[0].children
+assert.deepEqual(fix.map(part => part.textContent ?? part), ['Bạn ghi nhầm thành ', 'recieve', ', tôi đã tự sửa lại thành ', 'receive'])
+assert.deepEqual([fix[1].tagName, fix[3].tagName], ['b', 'b'])
+// A click inside the hover box doesn't toggle the card.
+cards[3].onclick({ target: cards[3].children[2] })
+assert.equal(cards[3].classList.contains('off'), false)
 cards[1].onclick()
 cards[3].onclick()
 assert.equal(picking.elements.get('#count').textContent, 2)
