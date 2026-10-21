@@ -14,4 +14,4 @@ The script runs the container as your user so it can write to `data-dev/`; a pla
 
 It serves on port 12000 (`http://100.109.137.65:12000/`). Leave the production stack (`compose.prod.yaml`) alone unless asked.
 
-Production runs as uid 10001 (`script/run-prod.sh`), so `data/history/` must be owned by 10001:10001. If conversions fail at "Đóng gói", check that ownership first.
+Production runs as uid 10001 (`script/run-prod.sh`), so `data/history/` and `data/output/` must be owned by 10001:10001. If conversions fail at "Đóng gói", check that ownership first.
