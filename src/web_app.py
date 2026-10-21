@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from anki_deck import ConversionCancelled, cancellation_check, generate_package, progress_sink, msg, research_entries
+from anki_deck import ConversionCancelled, cancellation_check, generate_package, progress_sink, prompt_dir, msg, research_entries
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.environ.get("ANKI_DATA_DIR", str(ROOT / "data")))
@@ -211,7 +211,7 @@ def research(job: dict):
     token = progress_sink.set(lambda line: progress(job, line))
     cancel_token = cancellation_check.set(lambda: check_job(job))
     try:
-        prompt = (ROOT / "src" / "research-prompt.md").read_text(encoding="utf-8")
+        prompt = (prompt_dir(ROOT) / "research-prompt.md").read_text(encoding="utf-8")
         check_job(job)
         result = research_entries(job["words"], prompt, ai_config())
         with lock:

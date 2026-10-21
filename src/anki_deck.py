@@ -148,8 +148,8 @@ AUDIO_DOWNLOAD_MAX_BYTES = 10 * 1024 * 1024
 AUDIO_DOWNLOAD_RETRY_CODES = {429, 500, 502, 503, 504}
 
 
-def src_dir(root: Path) -> Path:
-    return root / "src"
+def prompt_dir(root: Path) -> Path:
+    return root / "src" / "prompt"
 
 
 progress_sink: ContextVar = ContextVar("progress_sink", default=None)
@@ -762,9 +762,9 @@ def create_apkg(cards: list[dict], reverse_cards: list[dict], deck_name: str, ou
 
 
 def generate_package(root: Path, config: dict, senses: list[dict], output: Path) -> Path:
-    prompt = (src_dir(root) / "agent-prompt.md").read_text(encoding="utf-8")
-    reverse_prompt = (src_dir(root) / "reverse-prompt.md").read_text(encoding="utf-8")
-    verify_prompt = (src_dir(root) / "verify-prompt.md").read_text(encoding="utf-8")
+    prompt = (prompt_dir(root) / "agent-prompt.md").read_text(encoding="utf-8")
+    reverse_prompt = (prompt_dir(root) / "reverse-prompt.md").read_text(encoding="utf-8")
+    verify_prompt = (prompt_dir(root) / "verify-prompt.md").read_text(encoding="utf-8")
     cards, reverse_cards = generate_cards(senses, prompt, reverse_prompt, verify_prompt, config)
     with tempfile.TemporaryDirectory(prefix="anki-deck-audio-") as temp_dir:
         with timed_step("Lấy audio phát âm từ Wiktionary và Google TTS"):

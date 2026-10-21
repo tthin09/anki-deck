@@ -34,7 +34,7 @@ A conversion sometimes hangs, then fails with an error.
 The part of speech doesn't match how the word is used. For example, "like" is used as a verb in the sentence but is labelled `(n)`. Sometimes the label is completely wrong.
 
 ### Likely causes
-- **Field order in `CARD_SCHEMA`.** `part_of_speech` comes before `example_sentence`, so the model commits to the part of speech before it writes the sentence. The prompt (`src/agent-prompt.md`) asks it to choose the part of speech from the sentence, but the generation order makes that impossible.
+- **Field order in `CARD_SCHEMA`.** `part_of_speech` comes before `example_sentence`, so the model commits to the part of speech before it writes the sentence. The prompt (`src/prompt/agent-prompt.md`) asks it to choose the part of speech from the sentence, but the generation order makes that impossible.
 - **Reverse cards reuse the card's part of speech.** `make_reverse_note` builds `keyword = f"{answer} ({card['part_of_speech']})"`, but the reverse prompt writes a *new* sentence, where the word may play a different role.
 - **Weak model and large batches.** The default model is `gemini-3.1-flash-lite` with 30 words per call.
 - **No consistency check.** `validate_cards` only checks that the tag is in the allowed set, not that it matches the sentence.
