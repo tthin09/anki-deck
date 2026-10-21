@@ -5,10 +5,5 @@ src/config.json
 output/
 web/node_modules/
 web/dist/
-lessons/
-assets/
-learning-records/
-MISSION.md
-RESOURCES.md
 __pycache__/
 *.pyc
