@@ -1,6 +1,6 @@
 # Words with several meanings: the user can't choose which one
 
-Status: open, under discussion. No fix chosen yet.
+Status: fixed (2026-10-21) — see "Decision" below.
 
 ## Symptom
 Many words have more than one meaning (for example "bank": ngân hàng / bờ sông). The user can't pick which meaning they want on the card. The LLM picks one on its own, usually the first or most common meaning it thinks of, and that may not be the one the user is learning.
@@ -19,3 +19,7 @@ Many words have more than one meaning (for example "bank": ngân hàng / bờ s�
 ## Open questions
 - Should one word with two wanted meanings become one card or two cards?
 - Is a free-text hint enough, or does the user want to see and pick from a list?
+
+## Decision (2026-10-21)
+
+Research (`Tìm từ`) lists up to 4 senses per entry, most common first; the learner picks which senses to convert, and each chosen sense becomes its own vocabulary and practice card. See `docs/plans/research-step.md`.

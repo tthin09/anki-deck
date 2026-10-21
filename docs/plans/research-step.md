@@ -1,6 +1,6 @@
 # Research step — Plan
 
-Status: agreed 2026-10-21, not implemented.
+Status: implemented 2026-10-21.
 
 ## Problem
 

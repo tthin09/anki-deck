@@ -1,6 +1,6 @@
 # Multi-word input such as "as well as" has no defined behaviour
 
-Status: open, under discussion. No expected behaviour decided yet.
+Status: fixed (2026-10-21) — see "Decision" below.
 
 ## Symptom
 Users sometimes enter a phrase longer than one word, for example "as well as", "look forward to" or "take off". We haven't decided what the app should do with it.
@@ -20,3 +20,7 @@ Users sometimes enter a phrase longer than one word, for example "as well as", "
 ## Open questions
 - How common is this in real input lists?
 - Should the error message at least explain that phrases aren't supported yet, until we decide?
+
+## Decision (2026-10-21)
+
+Phrases are accepted (max 50 characters, inner spaces collapsed) and kept as one entry. A phrase has no part of speech, IPA or audio; it gets a meaning, an example sentence and a practice card, and its notes are tagged `phrase`. See `docs/plans/research-step.md`.
