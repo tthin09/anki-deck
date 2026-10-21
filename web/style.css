@@ -60,7 +60,7 @@ textarea.locked{background:#e9e4d6;color:#4f6159;cursor:not-allowed}
 .card.missing{cursor:default}
 .card.missing:hover{transform:rotate(var(--r))}
 /* Senses of a word with several meanings blink gold; a corrected typo blinks blue. */
-.card.multi::before,.card.fixed::before{content:"";position:absolute;inset:-4px;border:3px solid #e3b04b;border-radius:11px;opacity:0;animation:blink .5s ease-in-out .5s 3;pointer-events:none}
+.card.multi::before,.card.fixed::before{content:"";position:absolute;inset:-4px;border:3px solid #e3b04b;border-radius:11px;opacity:0;animation:blink 1s ease-in-out .5s;pointer-events:none}
 .card.fixed::before{border-color:#5aa9ff}
 .tip{display:none;position:absolute;left:50%;bottom:calc(100% + 8px);transform:translateX(-50%);width:max-content;max-width:260px;padding:.5rem .7rem;border-radius:6px;background:#1a2b26;color:#f7f1e3;font:400 .85rem/1.4 "Instrument Sans",system-ui,sans-serif;text-align:left;box-shadow:0 6px 16px #0008;pointer-events:none;z-index:2}
 .card:hover .tip,.card:focus-visible .tip{display:block}
