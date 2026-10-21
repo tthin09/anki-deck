@@ -43,6 +43,12 @@ async function api(url, options = {}) {
   return response
 }
 
+// 9.5s below a minute, then 1m01s
+function elapsed(ms) {
+  const seconds = ms / 1000
+  return seconds < 60 ? `${seconds.toFixed(1)}s` : `${Math.floor(seconds / 60)}m${String(Math.floor(seconds % 60)).padStart(2, '0')}s`
+}
+
 function el(tag, className, text) {
   const node = document.createElement(tag)
   if (className) node.className = className
@@ -56,6 +62,11 @@ function showEditor() {
   const error = document.querySelector('#error'), notice = document.querySelector('#notice'), log = document.querySelector('#log'), bar = document.querySelector('#progress'), preview = document.querySelector('#preview')
   // research: { id, entries, cards: [{ key, node }] in display order, selected: Set of "entry,sense" keys }
   let busy = false, count = 0, revision = 0, timer, research = null
+  // Build log: the latest row, while it is still running, shows how long it has been running.
+  let lines = [], runningSince = null, logTimer = null
+  const showLog = () => {
+    log.textContent = lines.join('\n') + (runningSince === null ? '' : ` (${elapsed(performance.now() - runningSince)})`)
+  }
   const setCount = value => { count = value; document.querySelector('#count').textContent = value }
   // Each word becomes a card; --i/--n let the CSS light cards up as progress reaches them.
   const showCards = words => {
@@ -171,10 +182,15 @@ function showEditor() {
   }
   // Runs a research or conversion job; after(ok, message, status) restores the screen when it ends.
   const runJob = async (url, payload, working, onDone, after) => {
-    busy = true; app.dataset.busy = true; editor.readOnly = true; edit.disabled = true; document.querySelector('.build-log').open = true; app.style.setProperty('--p', 5); convert.disabled = true; bar.value = 5; log.textContent = ''; error.textContent = ''
+    busy = true; app.dataset.busy = true; editor.readOnly = true; edit.disabled = true; document.querySelector('.build-log').open = true; app.style.setProperty('--p', 5); convert.disabled = true; bar.value = 5; error.textContent = ''
     convert.textContent = working
+    lines = []; runningSince = null; showLog()
+    logTimer = setInterval(() => { if (runningSince !== null) showLog() }, 100)
     const finish = (ok, message, status) => {
       stopTracking()
+      clearInterval(logTimer)
+      runningSince = null
+      showLog()
       busy = false
       app.dataset.busy = false
       edit.disabled = false
@@ -206,7 +222,12 @@ function showEditor() {
         const status = JSON.parse(event.data)
         bar.value = status.percent ?? bar.value
         app.style.setProperty('--p', bar.value)
-        if (status.type === 'line') { log.textContent += `${status.text}\n`; log.scrollTop = log.scrollHeight }
+        if (status.type === 'line') {
+          lines.push(status.text)
+          runningSince = status.text.startsWith('[Đang chạy]') ? performance.now() : null
+          showLog()
+          log.scrollTop = log.scrollHeight
+        }
         if (status.type === 'failed') finish(false, FAILED)
         if (status.type === 'cancelled') finish(false, CONNECTION_LOST)
         if (status.type === 'done') {

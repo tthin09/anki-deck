@@ -5,7 +5,7 @@ import vm from 'node:vm'
 
 const source = readFileSync(new URL('../web/main.js', import.meta.url), 'utf8').replace("import './style.css'", '')
 const storage = new Map()
-let nextJob = 0
+let nextJob = 0, clock = 0
 const tick = () => new Promise(resolve => setImmediate(resolve))
 
 function node(fields = {}) {
@@ -31,7 +31,7 @@ async function page(failures = {}) {
     return elements.get(key)
   }
   const context = {
-    console, TextEncoder, TextDecoder, URL,
+    console, TextEncoder, TextDecoder, URL, performance: { now: () => clock },
     document: { querySelector: element, createElement: tagName => node({ tagName }) },
     sessionStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
     window: { addEventListener: (type, handler) => { handlers[type] = handler }, location: { reload() {} } },
@@ -63,13 +63,13 @@ await first.elements.get('#convert').onclick()
 assert.equal(first.elements.get('#convert').disabled, true)
 assert.equal(first.elements.get('#convert').textContent, 'Đang tìm…')
 assert.equal(storage.get('conversion'), 'job1')
-assert.equal([...first.intervals.values()][0], 5000)
-await [...first.intervals.keys()][0]()
+const heartbeat = [...first.intervals].find(([, ms]) => ms === 5000)[0]
+await heartbeat()
 assert(first.calls.some(([, url]) => url === '/api/jobs/job1/heartbeat'))
 first.handlers.pagehide()
 assert(first.calls.some(([method, url]) => method === 'beacon' && url === '/api/jobs/job1/cancel'))
 assert.equal(first.streams[0].closed, true)
-assert.equal(first.intervals.size, 0)
+assert.equal(first.intervals.has(heartbeat), false)
 
 // A refreshed tab cancels the previous job before starting another.
 const refreshed = await page()
@@ -132,4 +132,23 @@ await expired.elements.get('#convert').onclick()
 assert.equal(expired.elements.get('#convert').textContent, 'Tìm từ')
 assert.equal(expired.elements.get('#editor').readOnly, false)
 assert.equal(expired.elements.get('#error').textContent, 'Lỗi do hệ thống: Kết quả tìm từ đã hết hạn.')
+// The running row of the build log shows its elapsed time, ticking every 0.1s.
+const timed = await page()
+await timed.elements.get('#convert').onclick()
+const log = timed.elements.get('#log')
+const tick100 = [...timed.intervals].find(([, ms]) => ms === 100)[0]
+clock = 1000
+await timed.streams[0].onmessage({ data: JSON.stringify({ type: 'line', text: '[Đang chạy] Tìm nghĩa, đợt 1/2 (30 từ)' }) })
+assert.equal(log.textContent, '[Đang chạy] Tìm nghĩa, đợt 1/2 (30 từ) (0.0s)')
+clock = 10500; tick100()
+assert.equal(log.textContent, '[Đang chạy] Tìm nghĩa, đợt 1/2 (30 từ) (9.5s)')
+clock = 62000; tick100()
+assert.equal(log.textContent, '[Đang chạy] Tìm nghĩa, đợt 1/2 (30 từ) (1m01s)')
+await timed.streams[0].onmessage({ data: JSON.stringify({ type: 'line', text: '[OK       ] Hoàn thành trong 61.0 giây.' }) })
+assert.equal(log.textContent, '[Đang chạy] Tìm nghĩa, đợt 1/2 (30 từ)\n[OK       ] Hoàn thành trong 61.0 giây.')
+await timed.streams[0].onmessage({ data: JSON.stringify({ type: 'line', text: '[Đang chạy] Tìm nghĩa, đợt 2/2 (5 từ)' }) })
+await timed.streams[0].onmessage({ data: JSON.stringify({ type: 'failed' }) })
+assert.match(log.textContent, /đợt 2\/2 \(5 từ\)$/)
+assert.equal([...timed.intervals.values()].includes(100), false)
+
 console.log('Frontend research, picking, cancellation, and heartbeat checks passed')
