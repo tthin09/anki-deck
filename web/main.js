@@ -32,17 +32,24 @@ async function api(url, options = {}) {
   return response
 }
 
+function el(tag, className, text) {
+  const node = document.createElement(tag)
+  if (className) node.className = className
+  if (text !== undefined) node.textContent = text
+  return node
+}
+
 function showEditor() {
-  app.innerHTML = `<div class="page"><aside class="rail"><h1>Vocabulary<br>Deck Generator</h1><label for="editor">Your words</label><textarea id="editor" spellcheck="false" aria-describedby="hint" placeholder="apple\nbook\ncat"></textarea><p class="hint" id="hint">Paste a list, comma-separated words or spreadsheet rows. Max 100. Drop a .txt file to replace.</p><button id="convert" disabled>Convert →</button><p role="alert" id="error"></p></aside><main class="table"><div class="meta"><span class="count"><b id="count">0</b> cards</span><span class="cap">of 100</span><progress id="progress" value="0" max="100" aria-label="Conversion progress"></progress></div><div id="preview" class="cards" aria-live="polite"></div><details class="build-log"><summary>Build log</summary><pre id="log" aria-live="polite"></pre></details></main></div>`
-  const editor = document.querySelector('#editor'), convert = document.querySelector('#convert')
-  const error = document.querySelector('#error'), log = document.querySelector('#log'), bar = document.querySelector('#progress'), preview = document.querySelector('#preview')
-  let busy = false, count = 0, revision = 0, timer
+  app.innerHTML = `<div class="page"><aside class="rail"><h1>Vocabulary<br>Deck Generator</h1><label for="editor">Your words</label><textarea id="editor" spellcheck="false" aria-describedby="hint" placeholder="apple\nbook\nas well as"></textarea><p class="hint" id="hint">Words or phrases. Paste a list, comma-separated words or spreadsheet rows. Max 100. Drop a .txt file to replace.</p><button id="edit" class="edit" type="button" hidden>← Sửa từ</button><button id="convert" disabled>Tìm từ</button><p role="alert" id="error"></p></aside><main class="table"><div class="meta"><span class="count"><b id="count">0</b> cards</span><span class="cap" id="cap">of 100</span><progress id="progress" value="0" max="100" aria-label="Progress"></progress></div><p id="notice" aria-live="polite"></p><div id="preview" class="cards" aria-live="polite"></div><details class="build-log"><summary>Build log</summary><pre id="log" aria-live="polite"></pre></details></main></div>`
+  const editor = document.querySelector('#editor'), convert = document.querySelector('#convert'), edit = document.querySelector('#edit')
+  const error = document.querySelector('#error'), notice = document.querySelector('#notice'), log = document.querySelector('#log'), bar = document.querySelector('#progress'), preview = document.querySelector('#preview')
+  // research: { id, entries, cards: [{ key, node }] in display order, selected: Set of "entry,sense" keys }
+  let busy = false, count = 0, revision = 0, timer, research = null
+  const setCount = value => { count = value; document.querySelector('#count').textContent = value }
   // Each word becomes a card; --i/--n let the CSS light cards up as progress reaches them.
   const showCards = words => {
     preview.replaceChildren(...words.map((word, i) => {
-      const card = document.createElement('div')
-      card.className = 'card'
-      card.textContent = word
+      const card = el('div', 'card', word)
       card.style.setProperty('--i', i)
       card.style.setProperty('--r', `${(word.length * 7) % 9 - 4}deg`)
       return card
@@ -58,49 +65,107 @@ function showEditor() {
         const response = await api('/api/preview', { method: 'POST', body: JSON.stringify({ text: editor.value }) })
         const result = await response.json()
         if (current !== revision) return
-        count = result.count
-        document.querySelector('#count').textContent = count
+        setCount(result.count)
         showCards(result.words)
         error.textContent = result.error || (count > 100 ? 'Maximum 100 unique words' : message)
         convert.disabled = busy || !count || count > 100 || !!result.error
       } catch (err) {
         if (current !== revision) return
-        count = 0
-        document.querySelector('#count').textContent = 0
+        setCount(0)
         showCards([])
         error.textContent = err.message
       }
     }, 180)
   }
-  editor.oninput = () => update()
-  editor.ondragover = event => { event.preventDefault() }
-  editor.ondrop = async event => {
-    event.preventDefault()
-    const file = event.dataTransfer.files[0]
-    if (!file || !file.name.toLowerCase().endsWith('.txt')) { error.textContent = 'Drop a .txt file'; return }
-    if (file.size >= 8192) { error.textContent = 'Input is too large'; return }
-    try {
-      editor.value = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer())
-      update()
-    } catch { error.textContent = 'File must be UTF-8' }
+  const toInput = (message = '') => {
+    research = null
+    editor.readOnly = false
+    editor.classList.remove('locked')
+    edit.hidden = true
+    notice.textContent = ''
+    convert.textContent = 'Tìm từ'
+    document.querySelector('#cap').textContent = 'of 100'
+    update(message)
   }
-  convert.onclick = async () => {
-    busy = true; app.dataset.busy = true; editor.readOnly = true; document.querySelector('.build-log').open = true; app.style.setProperty('--p', 5); convert.disabled = true; bar.value = 5; log.textContent = ''; error.textContent = ''
-    convert.textContent = 'Converting…'
-    const finish = message => {
+  const toPicking = () => {
+    editor.readOnly = true
+    editor.classList.add('locked')
+    edit.hidden = false
+    convert.textContent = 'Tạo bộ thẻ'
+    document.querySelector('#cap').textContent = 'selected'
+    setCount(research.selected.size)
+    convert.disabled = !count
+  }
+  // One card per sense; an entry's first sense starts selected.
+  const showSenses = () => {
+    research.cards = []
+    const nodes = research.entries.flatMap((item, e) => {
+      if (!item.senses.length) {
+        const card = el('div', 'card sense missing')
+        card.append(el('span', 'head', item.input), el('i', 'meaning', 'Không tìm thấy nghĩa'))
+        return [card]
+      }
+      return item.senses.map((sense, s) => {
+        const key = `${e},${s}`, card = el('button', 'card sense')
+        card.type = 'button'
+        card.style.setProperty('--r', `${(item.entry.length * 7 + s * 3) % 9 - 4}deg`)
+        if (item.senses.length > 1) card.classList.add('multi')
+        if (item.corrected) card.classList.add('fixed')
+        const tip = el('span', 'tip')
+        if (item.corrected) tip.append(el('span', 'fix', `Bạn ghi nhầm thành ${item.input}, tôi đã tự sửa lại thành ${item.entry}`))
+        const example = el('span')
+        example.innerHTML = sense.example_sentence  // the server allow-lists <b>, <i> and <br> only
+        tip.append(example)
+        card.append(el('span', 'head', sense.part_of_speech ? `${item.entry} (${sense.part_of_speech})` : item.entry),
+          el('i', 'meaning', sense.vietnamese_meaning), tip)
+        const paint = () => {
+          card.classList.toggle('off', !research.selected.has(key))
+          card.setAttribute('aria-pressed', String(research.selected.has(key)))
+        }
+        card.onclick = () => {
+          if (busy) return
+          research.selected.has(key) ? research.selected.delete(key) : research.selected.add(key)
+          paint()
+          setCount(research.selected.size)
+          convert.disabled = !count
+        }
+        paint()
+        research.cards.push({ key, node: card })
+        return card
+      })
+    })
+    preview.replaceChildren(...nodes)
+    const multi = research.entries.filter(item => item.senses.length > 1)
+    const extra = multi.reduce((sum, item) => sum + item.senses.length - 1, 0)
+    notice.textContent = multi.length ? `${multi.length} từ có nhiều hơn một nghĩa (${extra} nghĩa thêm). Chọn nghĩa bạn muốn thêm vào Anki.` : ''
+  }
+  const download = async id => {
+    const packageResponse = await api(`/api/jobs/${id}/download`)
+    const blob = await packageResponse.blob()
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = packageResponse.headers.get('Content-Disposition')?.match(/filename="([^"]+)"/)?.[1] ?? `vocabulary-${id}.apkg`
+    link.click()
+    setTimeout(() => URL.revokeObjectURL(url), 60000)
+  }
+  // Runs a research or conversion job; after(ok, message) restores the screen when it ends.
+  const runJob = async (url, payload, working, onDone, after) => {
+    busy = true; app.dataset.busy = true; editor.readOnly = true; edit.disabled = true; document.querySelector('.build-log').open = true; app.style.setProperty('--p', 5); convert.disabled = true; bar.value = 5; log.textContent = ''; error.textContent = ''
+    convert.textContent = working
+    const finish = (ok, message) => {
       stopTracking()
       busy = false
       app.dataset.busy = false
-      editor.readOnly = false
-      convert.textContent = 'Convert →'
+      edit.disabled = false
+      after(ok, message)
       error.textContent = message
-      update(message)
     }
     try {
       await recovery
-      const body = JSON.stringify({ text: editor.value })
+      const body = JSON.stringify(payload)
       if (new TextEncoder().encode(body).length >= 8192) throw Error('Request body must be fewer than 8192 bytes')
-      const response = await api('/api/jobs', { method: 'POST', body })
+      const response = await api(url, { method: 'POST', body })
       const { id } = await response.json()
       activeJob = id
       sessionStorage.setItem('conversion', id)
@@ -108,11 +173,11 @@ function showEditor() {
       heartbeatTimer = setInterval(async () => {
         try {
           const state = await (await api(`/api/jobs/${id}/heartbeat`, { method: 'POST' })).json()
-          if (activeJob === id && state.state === 'cancelled') finish('Conversion cancelled. You can try again.')
+          if (activeJob === id && state.state === 'cancelled') finish(false, 'Cancelled. You can try again.')
         } catch {
           if (activeJob === id) {
             api(`/api/jobs/${id}/cancel`, { method: 'POST' }).catch(() => {})
-            finish('Connection lost. Conversion cancelled.')
+            finish(false, 'Connection lost. Cancelled.')
           }
         }
       }, 5000)
@@ -122,29 +187,48 @@ function showEditor() {
         bar.value = status.percent ?? bar.value
         app.style.setProperty('--p', bar.value)
         if (status.type === 'line') { log.textContent += `${status.text}\n`; log.scrollTop = log.scrollHeight }
-        if (status.type === 'failed') finish('Conversion failed. Try again.')
-        if (status.type === 'cancelled') finish('Conversion cancelled. You can try again.')
+        if (status.type === 'failed') finish(false, 'Failed. Try again.')
+        if (status.type === 'cancelled') finish(false, 'Cancelled. You can try again.')
         if (status.type === 'done') {
           stream.close()
-          try {
-            const packageResponse = await api(`/api/jobs/${id}/download`)
-            const blob = await packageResponse.blob()
-            const url = URL.createObjectURL(blob)
-            const link = document.createElement('a')
-            link.href = url
-            link.download = packageResponse.headers.get('Content-Disposition')?.match(/filename="([^"]+)"/)?.[1] ?? `vocabulary-${id}.apkg`
-            link.click()
-            setTimeout(() => URL.revokeObjectURL(url), 60000)
-          } catch (err) { error.textContent = err.message }
-          finish(error.textContent)
+          let message = ''
+          try { await onDone(id, status) } catch (err) { message = err.message }
+          finish(true, message)
         }
       }
       stream.onerror = () => {
         if (activeJob !== id) return
         api(`/api/jobs/${id}/cancel`, { method: 'POST' }).catch(() => {})
-        finish('Connection lost. Conversion cancelled. Try again.')
+        finish(false, 'Connection lost. Cancelled. Try again.')
       }
-    } catch (err) { finish(err.message) }
+    } catch (err) { finish(false, err.message) }
+  }
+  editor.oninput = () => update()
+  editor.ondragover = event => { event.preventDefault() }
+  editor.ondrop = async event => {
+    event.preventDefault()
+    if (editor.readOnly) return
+    const file = event.dataTransfer.files[0]
+    if (!file || !file.name.toLowerCase().endsWith('.txt')) { error.textContent = 'Drop a .txt file'; return }
+    if (file.size >= 8192) { error.textContent = 'Input is too large'; return }
+    try {
+      editor.value = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer())
+      update()
+    } catch { error.textContent = 'File must be UTF-8' }
+  }
+  edit.onclick = () => { if (!busy) toInput() }
+  convert.onclick = () => {
+    if (!research) {
+      return runJob('/api/research', { text: editor.value }, 'Đang tìm…', (id, status) => {
+        research = { id, entries: status.result, selected: new Set(status.result.flatMap((item, e) => item.senses.length ? [`${e},0`] : [])) }
+      }, (ok, message) => ok && research ? (showSenses(), toPicking()) : toInput(message))
+    }
+    // Conversion: only the selected senses, in display order, light up as the deck builds.
+    const chosen = research.cards.filter(card => research.selected.has(card.key))
+    chosen.forEach((card, i) => card.node.style.setProperty('--i', i))
+    preview.style.setProperty('--n', chosen.length)
+    return runJob('/api/jobs', { research: research.id, senses: chosen.map(card => card.key.split(',').map(Number)) },
+      'Đang tạo…', download, () => toPicking())
   }
   update()
 }
