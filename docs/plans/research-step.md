@@ -14,7 +14,7 @@ Add a **Research** step between input and conversion. The AI lists the senses of
 ## Flow
 
 1. Learner types up to 100 entries (words or phrases). Button: **Tìm từ**.
-2. Research job: entries go to the AI in batches of 30 with `src/prompt/research-prompt.md`. Same job mechanism as conversion (progress events, heartbeat, cancel on leaving the page). Results do not survive a page reload.
+2. Research job: entries go to the AI in batches of 30 with `src/prompt/step_1/research-prompt.md`. Same job mechanism as conversion (progress events, heartbeat, cancel on leaving the page). Results do not survive a page reload.
 3. The input is greyed and locked. A **← Sửa từ** link unlocks it; the next **Tìm từ** researches everything again from scratch.
 4. Senses are shown as cards: entry + `(pos)` on the first line (no `(pos)` for phrases), Vietnamese meaning in italics below. Hover shows the sense's example sentence with the entry in bold.
    - Entry with ≥ 2 senses: its senses blink once; the first is selected, the rest unselected. Message: "N từ có nhiều hơn một nghĩa (X nghĩa thêm). Chọn nghĩa bạn muốn thêm vào Anki."
@@ -26,7 +26,7 @@ Add a **Research** step between input and conversion. The AI lists the senses of
 
 ## Conversion changes
 
-- Input to card generation is a chosen sense (entry, part of speech, Vietnamese meaning, research example), not a bare word. `src/prompt/agent-prompt.md` must keep the given part of speech and meaning and write a **different** example sentence from the research one. `src/prompt/reverse-prompt.md` and `src/prompt/verify-prompt.md` likewise must not change the sense.
+- Input to card generation is a chosen sense (entry, part of speech, Vietnamese meaning, research example), not a bare word. `src/prompt/step_2/agent-prompt.md` must keep the given part of speech and meaning and write a **different** example sentence from the research one. `src/prompt/step_3/reverse-prompt.md` and `src/prompt/step_4/verify-prompt.md` likewise must not change the sense.
 - Two chosen senses of one entry are two independent notes: drop `genanki.guid_for(tag, word)` so re-imports never overwrite. Audio is still fetched once per entry.
 - Phrase: no part of speech, IPA or audio; gets meaning, example sentence and a practice card. Front shows the phrase alone; practice back shows the answer alone.
 - Parser: allow spaces in an entry (still max 50 characters).

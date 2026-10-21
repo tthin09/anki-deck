@@ -7,7 +7,7 @@ Many words have more than one meaning (for example "bank": ngân hàng / bờ s�
 
 ## How it works now
 - Web input (`vocabulary` in `src/web_app.py`) takes one bare word per line, with no context or hint.
-- `src/prompt/agent-prompt.md` asks for one card per word, so the model writes one example sentence and one meaning, then chooses the rest from that.
+- `src/prompt/step_2/agent-prompt.md` asks for one card per word, so the model writes one example sentence and one meaning, then chooses the rest from that.
 - There is no step where the user sees or confirms the meaning before the deck is built.
 
 ## Fix options

@@ -7,7 +7,7 @@ Users sometimes enter a phrase longer than one word, for example "as well as", "
 
 ## How it works now
 - Web input (`vocabulary` in `src/web_app.py`) rejects any line with whitespace: "enter one word without spaces or tabs". So the phrase can't be converted from the web UI at all.
-- The prompt (`src/prompt/agent-prompt.md`) already says "word, phrase, or sentence" and has phrase tags (`np`, `vp`, `adjp`, `advp`, `s`), so the LLM side partly expects phrases.
+- The prompt (`src/prompt/step_2/agent-prompt.md`) already says "word, phrase, or sentence" and has phrase tags (`np`, `vp`, `adjp`, `advp`, `s`), so the LLM side partly expects phrases.
 - Audio comes from Wiktionary, with Google TTS as fallback. Many phrases have no Wiktionary page, so they would rely on TTS.
 
 ## Things to decide

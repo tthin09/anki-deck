@@ -211,7 +211,7 @@ def research(job: dict):
     token = progress_sink.set(lambda line: progress(job, line))
     cancel_token = cancellation_check.set(lambda: check_job(job))
     try:
-        prompt = (prompt_dir(ROOT) / "research-prompt.md").read_text(encoding="utf-8")
+        prompt = (prompt_dir(ROOT) / "step_1" / "research-prompt.md").read_text(encoding="utf-8")
         check_job(job)
         result = research_entries(job["words"], prompt, ai_config())
         with lock:
