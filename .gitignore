@@ -1,6 +1,7 @@
 src/config.json
 .env
-data/
+/data/
+/data-dev/
 web/node_modules/
 web/dist/
 __pycache__/

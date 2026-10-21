@@ -1,0 +1,18 @@
+services:
+  web:
+    user: "${ANKI_UID:-10001}:${ANKI_GID:-10001}"
+    build:
+      context: .
+      network: host
+    ports:
+      - "11000:12000"
+      - "9987:12000"
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?Set GEMINI_API_KEY in .env}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.1-flash-lite}
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:8000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped

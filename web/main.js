@@ -1,36 +1,84 @@
 import './style.css'
 
 const app = document.querySelector('#app')
+let activeJob = null, activeStream = null, heartbeatTimer = null
+const previousJob = sessionStorage.getItem('conversion')
+const recovery = previousJob ? api(`/api/jobs/${previousJob}/cancel`, { method: 'POST' }).catch(() => {}).finally(() => sessionStorage.removeItem('conversion')) : Promise.resolve()
+
+function stopTracking() {
+  clearInterval(heartbeatTimer)
+  activeStream?.close()
+  activeStream = null
+  activeJob = null
+  sessionStorage.removeItem('conversion')
+}
+
+window.addEventListener('pageshow', event => { if (event.persisted) window.location.reload() })
+window.addEventListener('pagehide', () => {
+  if (activeJob) {
+    const url = `/api/jobs/${activeJob}/cancel`
+    if (!navigator.sendBeacon(url)) fetch(url, { method: 'POST', keepalive: true }).catch(() => {})
+    clearInterval(heartbeatTimer)
+    activeStream?.close()
+  }
+})
+// Every message a learner can see says whose fault it is, in Vietnamese; the server's messages already do.
+const USER_ERROR = 'Lỗi do người dùng: ', SYSTEM_ERROR = 'Lỗi do hệ thống: '
+const CONNECTION_LOST = SYSTEM_ERROR + 'Mất kết nối với máy chủ nên lượt chạy đã dừng. Hãy kiểm tra mạng rồi thử lại.'
+const FAILED = SYSTEM_ERROR + 'Dịch vụ AI hoặc máy chủ đang gặp sự cố, không phải do bạn. Hãy thử lại sau ít phút.'
+
 async function api(url, options = {}) {
-  const response = await fetch(url, { ...options, headers: { 'Content-Type': 'application/json', ...options.headers } })
+  let response
+  try {
+    response = await fetch(url, { ...options, headers: { 'Content-Type': 'application/json', ...options.headers } })
+  } catch {
+    throw Error(SYSTEM_ERROR + 'Không kết nối được tới máy chủ. Hãy kiểm tra mạng rồi thử lại.')
+  }
   if (!response.ok) {
     let body = {}
     try { body = await response.json() } catch {}
-    throw Error(typeof body.detail === 'string' ? body.detail : `Request failed (${response.status})`)
+    const message = typeof body.detail === 'string' ? body.detail : `${SYSTEM_ERROR}Máy chủ trả lỗi (mã ${response.status}). Hãy tải lại trang rồi thử lại.`
+    throw Object.assign(Error(message), { status: response.status })
   }
   return response
 }
 
-function showLogin(error = '') {
-  app.innerHTML = `<main class="login"><h1>Vocabulary Deck Generator</h1><form id="login"><label>Username<input name="username" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button>Log in</button><p role="alert" id="error"></p></form></main>`
-  document.querySelector('#error').textContent = error
-  document.querySelector('#login').onsubmit = async event => {
-    event.preventDefault()
-    const form = new FormData(event.target)
-    try {
-      const response = await api('/api/login', { method: 'POST', body: JSON.stringify(Object.fromEntries(form)) })
-      showEditor((await response.json()).username)
-    } catch (err) { document.querySelector('#error').textContent = err.message }
-  }
+// 9.5s below a minute, then 1m01s
+function elapsed(ms) {
+  const seconds = ms / 1000
+  return seconds < 60 ? `${seconds.toFixed(1)}s` : `${Math.floor(seconds / 60)}m${String(Math.floor(seconds % 60)).padStart(2, '0')}s`
 }
 
-function showEditor(user) {
-  app.innerHTML = `<header><h1>Vocabulary Deck Generator</h1><div><span id="user"></span> <button id="logout" class="secondary">Log out</button></div></header><main><div class="layout"><section><h2>Vocabulary editor</h2><p>One word or phrase per line. Drop a UTF-8 .txt file here to replace the text.</p><textarea id="editor" aria-label="Vocabulary words" placeholder="apple\nbook\ncat"></textarea></section><div class="actions"><button id="convert" disabled>Convert →</button></div><section><h2>Preview</h2><p><strong id="count">0</strong> / 100 words</p><p id="preview" aria-live="polite">Enter vocabulary to begin.</p><p role="alert" id="error"></p></section></div><section class="status"><h2>Progress</h2><progress id="progress" value="0" max="100"></progress><pre id="log" aria-live="polite"></pre></section></main>`
-  document.querySelector('#user').textContent = user
-  const editor = document.querySelector('#editor'), convert = document.querySelector('#convert')
-  const error = document.querySelector('#error'), log = document.querySelector('#log'), bar = document.querySelector('#progress')
-  let busy = false, count = 0, revision = 0, timer
-  const update = () => {
+function el(tag, className, text) {
+  const node = document.createElement(tag)
+  if (className) node.className = className
+  if (text !== undefined) node.textContent = text
+  return node
+}
+
+function showEditor() {
+  app.innerHTML = `<div class="page"><aside class="rail"><h1>Vocabulary<br>Deck Generator</h1><label for="editor">Your words</label><textarea id="editor" spellcheck="false" aria-describedby="hint" placeholder="apple\nbook\nas well as"></textarea><p class="hint" id="hint">Nhập vào danh sách các từ, hoặc kéo thả file Notepad vào đây</p><button id="edit" class="edit" type="button" hidden>← Sửa từ</button><button id="convert" disabled>Tìm từ</button><p role="alert" id="error"></p></aside><main class="table"><div class="meta"><span class="count"><b id="count">0</b> cards</span><span class="cap" id="cap">of 100</span><progress id="progress" value="0" max="100" aria-label="Progress"></progress></div><p id="notice" aria-live="polite"></p><div id="preview" class="cards" aria-live="polite"></div><details class="build-log"><summary>Build log</summary><pre id="log" aria-live="polite"></pre></details></main></div>`
+  const editor = document.querySelector('#editor'), convert = document.querySelector('#convert'), edit = document.querySelector('#edit')
+  const error = document.querySelector('#error'), notice = document.querySelector('#notice'), log = document.querySelector('#log'), bar = document.querySelector('#progress'), preview = document.querySelector('#preview')
+  // research: { id, entries, cards: [{ key, node }] in display order, selected: Set of "entry,sense" keys }
+  let busy = false, count = 0, revision = 0, timer, research = null
+  // Build log: the latest row, while it is still running, shows how long it has been running.
+  let lines = [], runningSince = null, logTimer = null
+  const showLog = () => {
+    log.textContent = lines.join('\n') + (runningSince === null ? '' : ` (${elapsed(performance.now() - runningSince)})`)
+  }
+  const setCount = value => { count = value; document.querySelector('#count').textContent = value }
+  // Each word becomes a card; --i/--n let the CSS light cards up as progress reaches them.
+  const showCards = words => {
+    preview.replaceChildren(...words.map((word, i) => {
+      const card = el('div', 'card', word)
+      card.style.setProperty('--i', i)
+      card.style.setProperty('--r', `${(word.length * 7) % 9 - 4}deg`)
+      return card
+    }))
+    preview.style.setProperty('--n', words.length)
+  }
+  const update = (message = '') => {
     convert.disabled = true
     const current = ++revision
     clearTimeout(timer)
@@ -39,57 +87,192 @@ function showEditor(user) {
         const response = await api('/api/preview', { method: 'POST', body: JSON.stringify({ text: editor.value }) })
         const result = await response.json()
         if (current !== revision) return
-        count = result.count
-        document.querySelector('#count').textContent = count
-        document.querySelector('#preview').textContent = result.words.length ? result.words.join(', ') : 'Enter vocabulary to begin.'
-        error.textContent = count > 100 ? 'Maximum 100 unique words' : ''
-        convert.disabled = busy || !count || count > 100
-      } catch (err) { if (current === revision) { count = 0; error.textContent = err.message } }
+        setCount(result.count)
+        showCards(result.words)
+        error.textContent = result.error || (count > 100 ? USER_ERROR + 'Tối đa 100 từ mỗi lần. Hãy bớt từ hoặc chia thành nhiều lần.' : message)
+        convert.disabled = busy || !count || count > 100 || !!result.error
+      } catch (err) {
+        if (current !== revision) return
+        setCount(0)
+        showCards([])
+        error.textContent = err.message
+      }
     }, 180)
   }
-  editor.oninput = update
+  const toInput = (message = '') => {
+    research = null
+    editor.readOnly = false
+    editor.classList.remove('locked')
+    edit.hidden = true
+    notice.replaceChildren()
+    convert.textContent = 'Tìm từ'
+    document.querySelector('#cap').textContent = 'of 100'
+    update(message)
+  }
+  const toPicking = () => {
+    editor.readOnly = true
+    editor.classList.add('locked')
+    edit.hidden = false
+    convert.textContent = 'Tạo bộ thẻ'
+    document.querySelector('#cap').textContent = 'selected'
+    setCount(research.selected.size)
+    convert.disabled = !count
+  }
+  // One card per sense; an entry's first sense starts selected.
+  const showSenses = () => {
+    research.cards = []
+    let group = 0
+    const nodes = research.entries.flatMap((item, e) => {
+      const g = item.senses.length > 1 ? group++ : 0
+      if (!item.senses.length) {
+        const card = el('div', 'card sense missing')
+        card.append(el('span', 'head', item.input), el('i', 'meaning', 'Không tìm thấy nghĩa'))
+        return [card]
+      }
+      return item.senses.map((sense, s) => {
+        const key = `${e},${s}`, card = el('button', 'card sense')
+        card.type = 'button'
+        card.style.setProperty('--r', `${(item.entry.length * 7 + s * 3) % 9 - 4}deg`)
+        // --g: the senses of one word blink together, one word after another
+        if (item.senses.length > 1) { card.classList.add('multi'); card.style.setProperty('--g', g) }
+        if (item.corrected) card.classList.add('fixed')
+        const tip = el('span', 'tip')
+        if (item.corrected) {
+          const fix = el('span', 'fix')
+          fix.append('Bạn ghi nhầm thành ', el('b', '', item.input), ', tôi đã tự sửa lại thành ', el('b', '', item.entry))
+          tip.append(fix)
+        }
+        const example = el('span')
+        example.innerHTML = sense.example_sentence  // the server allow-lists <b>, <i> and <br> only
+        tip.append(example)
+        card.append(el('span', 'head', sense.part_of_speech ? `${item.entry} (${sense.part_of_speech})` : item.entry),
+          el('i', 'meaning', sense.vietnamese_meaning), tip)
+        const paint = () => {
+          card.classList.toggle('off', !research.selected.has(key))
+          card.setAttribute('aria-pressed', String(research.selected.has(key)))
+        }
+        card.onclick = event => {
+          // the hover box sits inside the card; clicking it (e.g. to select text) mustn't toggle the card
+          if (busy || tip.contains(event?.target)) return
+          research.selected.has(key) ? research.selected.delete(key) : research.selected.add(key)
+          paint()
+          setCount(research.selected.size)
+          convert.disabled = !count
+        }
+        paint()
+        research.cards.push({ key, node: card })
+        return card
+      })
+    })
+    preview.replaceChildren(...nodes)
+    const multi = research.entries.filter(item => item.senses.length > 1)
+    notice.replaceChildren(...(multi.length ? ['Tôi tìm được các từ sau có nhiều hơn một nghĩa: ',
+      ...multi.flatMap((item, i) => [i ? ', ' : '', el('b', '', item.entry)]),
+      '. Hãy chọn các từ bạn muốn thêm vào Anki bên dưới.'] : []))
+  }
+  const download = async id => {
+    const packageResponse = await api(`/api/jobs/${id}/download`)
+    const blob = await packageResponse.blob()
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = packageResponse.headers.get('Content-Disposition')?.match(/filename="([^"]+)"/)?.[1] ?? `vocabulary-${id}.apkg`
+    link.click()
+    setTimeout(() => URL.revokeObjectURL(url), 60000)
+  }
+  // Runs a research or conversion job; after(ok, message, status) restores the screen when it ends.
+  const runJob = async (url, payload, working, onDone, after) => {
+    busy = true; app.dataset.busy = true; editor.readOnly = true; edit.disabled = true; document.querySelector('.build-log').open = true; app.style.setProperty('--p', 5); convert.disabled = true; bar.value = 5; error.textContent = ''
+    convert.textContent = working
+    lines = []; runningSince = null; showLog()
+    logTimer = setInterval(() => { if (runningSince !== null) showLog() }, 100)
+    const finish = (ok, message, status) => {
+      stopTracking()
+      clearInterval(logTimer)
+      runningSince = null
+      showLog()
+      busy = false
+      app.dataset.busy = false
+      edit.disabled = false
+      after(ok, message, status)
+      error.textContent = message
+    }
+    try {
+      await recovery
+      const body = JSON.stringify(payload)
+      if (new TextEncoder().encode(body).length >= 8192) throw Error(USER_ERROR + 'Danh sách quá dài. Hãy chia thành nhiều lần, mỗi lần tối đa 100 từ.')
+      const response = await api(url, { method: 'POST', body })
+      const { id } = await response.json()
+      activeJob = id
+      sessionStorage.setItem('conversion', id)
+      const stream = activeStream = new EventSource(`/api/jobs/${id}/events`)
+      heartbeatTimer = setInterval(async () => {
+        try {
+          const state = await (await api(`/api/jobs/${id}/heartbeat`, { method: 'POST' })).json()
+          if (activeJob === id && state.state === 'cancelled') finish(false, CONNECTION_LOST)
+        } catch {
+          if (activeJob === id) {
+            api(`/api/jobs/${id}/cancel`, { method: 'POST' }).catch(() => {})
+            finish(false, CONNECTION_LOST)
+          }
+        }
+      }, 5000)
+      stream.onmessage = async event => {
+        if (activeJob !== id) return
+        const status = JSON.parse(event.data)
+        bar.value = status.percent ?? bar.value
+        app.style.setProperty('--p', bar.value)
+        if (status.type === 'line') {
+          lines.push(status.text)
+          runningSince = status.text.startsWith('[Đang chạy]') ? performance.now() : null
+          showLog()
+          log.scrollTop = log.scrollHeight
+        }
+        if (status.type === 'failed') finish(false, FAILED)
+        if (status.type === 'cancelled') finish(false, CONNECTION_LOST)
+        if (status.type === 'done') {
+          stream.close()
+          let message = ''
+          try { await onDone(id, status) } catch (err) { message = err.message }
+          finish(true, message)
+        }
+      }
+      stream.onerror = () => {
+        if (activeJob !== id) return
+        api(`/api/jobs/${id}/cancel`, { method: 'POST' }).catch(() => {})
+        finish(false, CONNECTION_LOST)
+      }
+    } catch (err) { finish(false, err.message, err.status) }
+  }
+  editor.oninput = () => update()
   editor.ondragover = event => { event.preventDefault() }
   editor.ondrop = async event => {
     event.preventDefault()
+    if (editor.readOnly) return
     const file = event.dataTransfer.files[0]
-    if (!file || !file.name.toLowerCase().endsWith('.txt')) { error.textContent = 'Drop a .txt file'; return }
-    if (file.size > 32000) { error.textContent = 'Input is too large'; return }
+    if (!file || !file.name.toLowerCase().endsWith('.txt')) { error.textContent = USER_ERROR + 'Chỉ nhận file .txt (file Notepad).'; return }
+    if (file.size >= 8192) { error.textContent = USER_ERROR + 'File quá dài. Hãy chia thành nhiều file, mỗi file tối đa 100 từ.'; return }
     try {
       editor.value = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer())
       update()
-    } catch { error.textContent = 'File must be UTF-8' }
+    } catch { error.textContent = USER_ERROR + 'Không đọc được file. Hãy lưu file Notepad với mã hoá UTF-8 rồi thử lại.' }
   }
-  document.querySelector('#logout').onclick = async () => { await api('/api/logout', { method: 'POST' }); showLogin() }
-  convert.onclick = async () => {
-    busy = true; convert.disabled = true; bar.value = 5; log.textContent = ''; error.textContent = ''
-    try {
-      const response = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ text: editor.value }) })
-      const { id } = await response.json()
-      const stream = new EventSource(`/api/jobs/${id}/events`)
-      stream.onmessage = async event => {
-        const status = JSON.parse(event.data)
-        bar.value = status.percent ?? bar.value
-        if (status.type === 'line') { log.textContent += `${status.text}\n`; log.scrollTop = log.scrollHeight }
-        if (status.type === 'failed') { stream.close(); busy = false; update(); error.textContent = 'Conversion failed. Try again.' }
-        if (status.type === 'done') {
-          stream.close()
-          try {
-            const packageResponse = await api(`/api/jobs/${id}/download`)
-            const blob = await packageResponse.blob()
-            const url = URL.createObjectURL(blob)
-            const link = document.createElement('a')
-            link.href = url
-            link.download = packageResponse.headers.get('Content-Disposition')?.match(/filename="([^"]+)"/)?.[1] ?? `vocabulary-${id}.apkg`
-            link.click()
-            setTimeout(() => URL.revokeObjectURL(url), 60000)
-          } catch (err) { error.textContent = err.message }
-          busy = false; update()
-        }
-      }
-      stream.onerror = () => { stream.close(); busy = false; update(); error.textContent = 'Connection lost. Try again.' }
-    } catch (err) { busy = false; update(); error.textContent = err.message }
+  edit.onclick = () => { if (!busy) toInput() }
+  convert.onclick = () => {
+    if (!research) {
+      return runJob('/api/research', { text: editor.value }, 'Đang tìm…', (id, status) => {
+        research = { id, entries: status.result, selected: new Set(status.result.flatMap((item, e) => item.senses.length ? [`${e},0`] : [])) }
+      }, (ok, message) => ok && research ? (showSenses(), toPicking()) : toInput(message))
+    }
+    // Conversion: only the selected senses, in display order, light up as the deck builds.
+    const chosen = research.cards.filter(card => research.selected.has(card.key))
+    chosen.forEach((card, i) => card.node.style.setProperty('--i', i))
+    preview.style.setProperty('--n', chosen.length)
+    return runJob('/api/jobs', { research: research.id, senses: chosen.map(card => card.key.split(',').map(Number)) },
+      // 410: the research is gone (expired or the server restarted), so the learner has to search again
+      'Đang tạo…', download, (ok, message, status) => status === 410 ? toInput(message) : toPicking())
   }
   update()
 }
 
-api('/api/me').then(r => r.json()).then(data => showEditor(data.username)).catch(() => showLogin())
+showEditor()
