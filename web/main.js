@@ -40,7 +40,7 @@ function el(tag, className, text) {
 }
 
 function showEditor() {
-  app.innerHTML = `<div class="page"><aside class="rail"><h1>Vocabulary<br>Deck Generator</h1><label for="editor">Your words</label><textarea id="editor" spellcheck="false" aria-describedby="hint" placeholder="apple\nbook\nas well as"></textarea><p class="hint" id="hint">Words or phrases. Paste a list, comma-separated words or spreadsheet rows. Max 100. Drop a .txt file to replace.</p><button id="edit" class="edit" type="button" hidden>← Sửa từ</button><button id="convert" disabled>Tìm từ</button><p role="alert" id="error"></p></aside><main class="table"><div class="meta"><span class="count"><b id="count">0</b> cards</span><span class="cap" id="cap">of 100</span><progress id="progress" value="0" max="100" aria-label="Progress"></progress></div><p id="notice" aria-live="polite"></p><div id="preview" class="cards" aria-live="polite"></div><details class="build-log"><summary>Build log</summary><pre id="log" aria-live="polite"></pre></details></main></div>`
+  app.innerHTML = `<div class="page"><aside class="rail"><h1>Vocabulary<br>Deck Generator</h1><label for="editor">Your words</label><textarea id="editor" spellcheck="false" aria-describedby="hint" placeholder="apple\nbook\nas well as"></textarea><p class="hint" id="hint">Nhập vào danh sách các từ, hoặc kéo thả file Notepad vào đây</p><button id="edit" class="edit" type="button" hidden>← Sửa từ</button><button id="convert" disabled>Tìm từ</button><p role="alert" id="error"></p></aside><main class="table"><div class="meta"><span class="count"><b id="count">0</b> cards</span><span class="cap" id="cap">of 100</span><progress id="progress" value="0" max="100" aria-label="Progress"></progress></div><p id="notice" aria-live="polite"></p><div id="preview" class="cards" aria-live="polite"></div><details class="build-log"><summary>Build log</summary><pre id="log" aria-live="polite"></pre></details></main></div>`
   const editor = document.querySelector('#editor'), convert = document.querySelector('#convert'), edit = document.querySelector('#edit')
   const error = document.querySelector('#error'), notice = document.querySelector('#notice'), log = document.querySelector('#log'), bar = document.querySelector('#progress'), preview = document.querySelector('#preview')
   // research: { id, entries, cards: [{ key, node }] in display order, selected: Set of "entry,sense" keys }
@@ -82,7 +82,7 @@ function showEditor() {
     editor.readOnly = false
     editor.classList.remove('locked')
     edit.hidden = true
-    notice.textContent = ''
+    notice.replaceChildren()
     convert.textContent = 'Tìm từ'
     document.querySelector('#cap').textContent = 'of 100'
     update(message)
@@ -99,7 +99,9 @@ function showEditor() {
   // One card per sense; an entry's first sense starts selected.
   const showSenses = () => {
     research.cards = []
+    let group = 0
     const nodes = research.entries.flatMap((item, e) => {
+      const g = item.senses.length > 1 ? group++ : 0
       if (!item.senses.length) {
         const card = el('div', 'card sense missing')
         card.append(el('span', 'head', item.input), el('i', 'meaning', 'Không tìm thấy nghĩa'))
@@ -109,7 +111,8 @@ function showEditor() {
         const key = `${e},${s}`, card = el('button', 'card sense')
         card.type = 'button'
         card.style.setProperty('--r', `${(item.entry.length * 7 + s * 3) % 9 - 4}deg`)
-        if (item.senses.length > 1) card.classList.add('multi')
+        // --g: the senses of one word blink together, one word after another
+        if (item.senses.length > 1) { card.classList.add('multi'); card.style.setProperty('--g', g) }
         if (item.corrected) card.classList.add('fixed')
         const tip = el('span', 'tip')
         if (item.corrected) tip.append(el('span', 'fix', `Bạn ghi nhầm thành ${item.input}, tôi đã tự sửa lại thành ${item.entry}`))
@@ -136,8 +139,9 @@ function showEditor() {
     })
     preview.replaceChildren(...nodes)
     const multi = research.entries.filter(item => item.senses.length > 1)
-    const extra = multi.reduce((sum, item) => sum + item.senses.length - 1, 0)
-    notice.textContent = multi.length ? `${multi.length} từ có nhiều hơn một nghĩa (${extra} nghĩa thêm). Chọn nghĩa bạn muốn thêm vào Anki.` : ''
+    notice.replaceChildren(...(multi.length ? ['Tôi tìm được các từ sau có nhiều hơn một nghĩa: ',
+      ...multi.flatMap((item, i) => [i ? ', ' : '', el('b', '', item.entry)]),
+      '. Hãy chọn các từ bạn muốn thêm vào Anki bên dưới.'] : []))
   }
   const download = async id => {
     const packageResponse = await api(`/api/jobs/${id}/download`)
