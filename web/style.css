@@ -61,8 +61,8 @@ textarea.locked{background:#e9e4d6;color:#4f6159;cursor:not-allowed}
 .card.missing{cursor:default}
 .card.missing:hover{transform:rotate(var(--r))}
 /* Senses of a word with several meanings blink gold; a corrected typo blinks blue. */
-/* Starts after the cards are dealt; word --g blinks after word --g - 1. */
-.card.multi::before,.card.fixed::before{content:"";position:absolute;inset:-5px;border:3px solid #e3b04b;border-radius:11px;box-shadow:0 0 14px #e3b04b;opacity:0;animation:blink .6s ease-in-out calc(1.2s + min(var(--g, 0), 15) * 1.2s) 2;pointer-events:none}
+/* A soft glow every 15s, starting after the cards are dealt; word --g glows 1.2s after word --g - 1. */
+.card.multi::before,.card.fixed::before{content:"";position:absolute;inset:-5px;border:2px solid #e3b04b;border-radius:11px;box-shadow:0 0 10px #e3b04b;opacity:0;animation:blink 15s ease-in-out calc(1.2s + min(var(--g, 0), 10) * 1.2s) infinite;pointer-events:none}
 .card.fixed::before{border-color:#8cc8ff;box-shadow:0 0 14px #8cc8ff}
 .card.fixed,.card.fixed.off{box-shadow:0 0 0 3px #8cc8ff,0 10px 18px -6px #000a}
 .tip{display:none;position:absolute;left:50%;bottom:calc(100% + 8px);transform:translateX(-50%);width:max-content;max-width:260px;padding:.5rem .7rem;border-radius:6px;background:#1a2b26;color:#f7f1e3;font:400 .85rem/1.4 "Instrument Sans",system-ui,sans-serif;text-align:left;box-shadow:0 6px 16px #0008;cursor:auto;user-select:text;z-index:2}
@@ -73,4 +73,4 @@ textarea.locked{background:#e9e4d6;color:#4f6159;cursor:not-allowed}
 .tip .fix{display:block;margin-bottom:.3rem;color:#8cc8ff}
 #app[data-busy="true"] .card.off,#app[data-busy="true"] .card.missing{display:none}
 #app[data-busy="true"] .card.sense{pointer-events:none}
-@keyframes blink{50%{opacity:1}}
+@keyframes blink{0%,8%,100%{opacity:0}4%{opacity:.55}}
