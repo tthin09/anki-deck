@@ -8,7 +8,7 @@ RUN npm run build
 FROM python:3.12-slim
 WORKDIR /app
 RUN pip install --no-cache-dir fastapi uvicorn genanki==0.13.1 'setuptools<81'
-COPY src/anki_deck.py src/web_app.py src/agent-prompt.md src/reverse-prompt.md src/verify-prompt.md /app/src/
+COPY src/anki_deck.py src/web_app.py src/agent-prompt.md src/reverse-prompt.md src/verify-prompt.md src/research-prompt.md /app/src/
 COPY --from=frontend /web/dist /app/web/dist
 RUN mkdir -p /data && chown 10001:10001 /data
 ENV ANKI_DATA_DIR=/data PYTHONUNBUFFERED=1
